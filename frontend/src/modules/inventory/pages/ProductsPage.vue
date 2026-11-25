@@ -303,7 +303,7 @@ const hasActiveFilters = computed(() => {
 </script>
 
 <template>
-  <div class="w-full min-w-0 space-y-5 sm:space-y-6 pb-12 font-sans max-w-7xl mx-auto px-3 sm:px-6">
+  <div class="products-page w-full min-w-0 max-w-full overflow-x-hidden space-y-5 sm:space-y-6 pb-12 font-sans max-w-7xl mx-auto px-3 sm:px-6">
     <!-- Header Section -->
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
       <div>
@@ -402,8 +402,8 @@ const hasActiveFilters = computed(() => {
     </div>
 
     <!-- Filter & Search Toolbar -->
-    <div class="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm space-y-3">
-      <div class="flex flex-col md:flex-row items-center gap-3">
+    <div class="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm space-y-3 min-w-0 max-w-full overflow-hidden">
+      <div class="flex flex-col md:flex-row items-stretch md:items-center gap-3 min-w-0">
         <!-- Search Input -->
         <div class="relative flex-1 w-full">
           <Search class="absolute left-3.5 top-1/2 -translate-y-1/2 h-4 w-4 text-slate-400" />
@@ -423,9 +423,9 @@ const hasActiveFilters = computed(() => {
         </div>
 
         <!-- Filters Grid -->
-        <div class="grid grid-cols-2 sm:grid-cols-3 gap-2.5 w-full md:w-auto">
+        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 w-full md:w-auto min-w-0">
           <!-- Category Select -->
-          <div class="w-full sm:w-44">
+          <div class="w-full sm:w-44 min-w-0">
             <UiSelect
               v-model="filters.category_id"
               :options="categoryFilterOptions"
@@ -433,7 +433,7 @@ const hasActiveFilters = computed(() => {
           </div>
 
           <!-- Status Select -->
-          <div class="w-full sm:w-36">
+          <div class="w-full sm:w-36 min-w-0">
             <UiSelect
               v-model="filters.status"
               :options="statusOptions"
@@ -441,7 +441,7 @@ const hasActiveFilters = computed(() => {
           </div>
 
           <!-- Type Select -->
-          <div class="w-full sm:w-36">
+          <div class="w-full sm:w-36 min-w-0">
             <UiSelect
               v-model="filters.type"
               :options="typeOptions"
@@ -450,7 +450,7 @@ const hasActiveFilters = computed(() => {
         </div>
 
         <!-- View Mode & Reset -->
-        <div class="flex items-center space-x-2 self-end md:self-center">
+        <div class="flex items-center space-x-2 self-start md:self-center min-w-0">
           <button
             v-if="hasActiveFilters"
             @click="resetFilters"
@@ -650,7 +650,7 @@ const hasActiveFilters = computed(() => {
         <p class="text-xs text-slate-400 mt-1 max-w-sm mx-auto">{{ $t('inventory.noProductsDescription') }}</p>
       </div>
 
-      <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4">
+      <div v-else class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-4 min-w-0">
         <div
           v-for="product in productList"
           :key="product.id"
@@ -803,3 +803,10 @@ const hasActiveFilters = computed(() => {
     </UiModal>
   </div>
 </template>
+
+<style scoped>
+.products-page :deep(select) {
+  min-width: 0;
+  max-width: 100%;
+}
+</style>
