@@ -303,13 +303,13 @@ const hasActiveFilters = computed(() => {
 </script>
 
 <template>
-  <div class="space-y-6 pb-12 font-sans max-w-7xl mx-auto px-4 sm:px-6">
+  <div class="space-y-5 sm:space-y-6 pb-12 font-sans max-w-7xl mx-auto px-3 sm:px-6">
     <!-- Header Section -->
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
       <div>
         <div class="flex items-center space-x-2">
-          <h1 class="text-2xl sm:text-3xl font-black text-slate-900 tracking-tight">{{ $t('inventory.productsCatalog') }}</h1>
-          <span class="px-2.5 py-0.5 rounded-full text-xs font-bold bg-blue-50 text-blue-700 border border-blue-100">
+          <h1 class="text-xl sm:text-3xl font-black text-slate-900 tracking-tight">{{ $t('inventory.productsCatalog') }}</h1>
+          <span class="px-2 py-0.5 rounded-full text-[11px] sm:text-xs font-bold bg-blue-50 text-blue-700 border border-blue-100 whitespace-nowrap">
             {{ $t('inventory.itemsCount', { count: totalProductsCount }) }}
           </span>
         </div>
@@ -360,40 +360,40 @@ const hasActiveFilters = computed(() => {
 
     <!-- Summary KPI Cards -->
     <div class="grid grid-cols-2 sm:grid-cols-4 gap-3 sm:gap-4">
-      <div class="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex items-center justify-between">
+      <div class="bg-white p-3 sm:p-4 rounded-2xl border border-slate-200/80 shadow-sm flex items-center justify-between min-w-0">
         <div>
           <p class="text-[11px] font-bold uppercase tracking-wider text-slate-400">{{ $t('inventory.totalCatalog') }}</p>
-          <h3 class="text-xl sm:text-2xl font-black text-slate-900 mt-1">{{ totalProductsCount }}</h3>
+          <h3 class="text-lg sm:text-2xl font-black text-slate-900 mt-1">{{ totalProductsCount }}</h3>
         </div>
         <div class="p-2.5 bg-blue-50 text-blue-600 rounded-xl">
           <Package class="w-5 h-5" />
         </div>
       </div>
 
-      <div class="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex items-center justify-between">
+      <div class="bg-white p-3 sm:p-4 rounded-2xl border border-slate-200/80 shadow-sm flex items-center justify-between min-w-0">
         <div>
           <p class="text-[11px] font-bold uppercase tracking-wider text-slate-400">{{ $t('inventory.lowStockAlert') }}</p>
-          <h3 class="text-xl sm:text-2xl font-black text-amber-600 mt-1">{{ lowStockCount }}</h3>
+          <h3 class="text-lg sm:text-2xl font-black text-amber-600 mt-1">{{ lowStockCount }}</h3>
         </div>
         <div class="p-2.5 bg-amber-50 text-amber-600 rounded-xl">
           <AlertTriangle class="w-5 h-5" />
         </div>
       </div>
 
-      <div class="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex items-center justify-between">
+      <div class="bg-white p-3 sm:p-4 rounded-2xl border border-slate-200/80 shadow-sm flex items-center justify-between min-w-0">
         <div>
           <p class="text-[11px] font-bold uppercase tracking-wider text-slate-400">{{ $t('inventory.outOfStock') }}</p>
-          <h3 class="text-xl sm:text-2xl font-black text-red-600 mt-1">{{ outOfStockCount }}</h3>
+          <h3 class="text-lg sm:text-2xl font-black text-red-600 mt-1">{{ outOfStockCount }}</h3>
         </div>
         <div class="p-2.5 bg-red-50 text-red-600 rounded-xl">
           <Boxes class="w-5 h-5" />
         </div>
       </div>
 
-      <div class="bg-white p-4 rounded-2xl border border-slate-200/80 shadow-sm flex items-center justify-between">
+      <div class="bg-white p-3 sm:p-4 rounded-2xl border border-slate-200/80 shadow-sm flex items-center justify-between min-w-0">
         <div>
           <p class="text-[11px] font-bold uppercase tracking-wider text-slate-400">{{ $t('inventory.inventoryValuation') }}</p>
-          <h3 class="text-xl sm:text-2xl font-black text-emerald-600 mt-1">{{ formattedValuation }}</h3>
+          <h3 class="text-base sm:text-2xl font-black text-emerald-600 mt-1 truncate">{{ formattedValuation }}</h3>
         </div>
         <div class="p-2.5 bg-emerald-50 text-emerald-600 rounded-xl">
           <DollarSign class="w-5 h-5" />
@@ -480,7 +480,7 @@ const hasActiveFilters = computed(() => {
     </div>
 
     <!-- Table View Mode -->
-    <div v-if="viewMode === 'table'" class="bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
+    <div v-if="viewMode === 'table'" class="hidden md:block bg-white rounded-2xl border border-slate-200/80 shadow-sm overflow-hidden">
       <UiTable
         :columns="columns"
         :data="productList"
@@ -569,6 +569,69 @@ const hasActiveFilters = computed(() => {
           </div>
         </template>
       </UiTable>
+    </div>
+
+    <!-- Mobile Product List -->
+    <div v-if="viewMode === 'table'" class="md:hidden space-y-3">
+      <div v-if="isLoading" class="space-y-3">
+        <div v-for="i in 5" :key="i" class="h-24 bg-white rounded-2xl border border-slate-200 animate-pulse" />
+      </div>
+
+      <div v-else-if="productList.length === 0" class="bg-white rounded-2xl border border-slate-200/80 p-8 text-center">
+        <Package class="h-10 w-10 text-slate-300 mx-auto mb-3" />
+        <h3 class="text-sm font-bold text-slate-800">{{ $t('inventory.noProductsFound') }}</h3>
+        <p class="text-xs text-slate-400 mt-1">{{ $t('inventory.noProductsDescription') }}</p>
+      </div>
+
+      <article
+        v-for="product in productList"
+        v-else
+        :key="product.id"
+        class="bg-white rounded-2xl border border-slate-200/80 p-3 shadow-sm"
+      >
+        <div class="flex items-center gap-3 min-w-0">
+          <div class="h-14 w-14 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center overflow-hidden shrink-0">
+            <img
+              v-if="resolveImageUrl(product.primary_image_url || (product as any).images?.[0]?.url || (product as any).images?.[0]?.path)"
+              :src="resolveImageUrl(product.primary_image_url || (product as any).images?.[0]?.url || (product as any).images?.[0]?.path)!"
+              :alt="product.name"
+              class="h-full w-full object-cover"
+            />
+            <Package v-else class="h-6 w-6 text-slate-400" />
+          </div>
+
+          <button type="button" class="text-left min-w-0 flex-1" @click="handleEdit(product)">
+            <h3 class="font-bold text-sm text-slate-900 truncate">{{ product.name }}</h3>
+            <p class="font-mono text-[11px] text-slate-400 truncate mt-0.5">{{ product.sku }}</p>
+            <p class="text-[11px] text-slate-500 truncate mt-1">
+              {{ product.category?.name || $t('inventory.generalInfo.uncategorized') }} · {{ money(product.selling_price) }}
+            </p>
+          </button>
+
+          <div class="flex flex-col items-end gap-2 shrink-0">
+            <span
+              :class="[
+                'px-2 py-0.5 rounded-full text-[10px] font-bold whitespace-nowrap',
+                (product.available_quantity ?? (product as any).stock ?? 0) <= 0
+                  ? 'bg-red-50 text-red-600 border border-red-200'
+                  : (product.available_quantity ?? (product as any).stock ?? 0) <= 5
+                  ? 'bg-amber-50 text-amber-600 border border-amber-200'
+                  : 'bg-emerald-50 text-emerald-600 border border-emerald-200'
+              ]"
+            >
+              {{ $t('inventory.units', { count: product.available_quantity ?? (product as any).stock ?? 0 }) }}
+            </span>
+            <div class="flex items-center gap-1">
+              <button type="button" @click="handleEdit(product)" class="p-1.5 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-lg" :title="$t('inventory.editProduct')">
+                <Edit2 class="h-4 w-4" />
+              </button>
+              <button type="button" @click="openDeleteConfirm(product)" class="p-1.5 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg" :title="$t('inventory.deleteProduct')">
+                <Trash2 class="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </article>
     </div>
 
     <!-- Grid Card View Mode -->
