@@ -174,7 +174,9 @@ const catalogItems = computed(() => {
     const variants = baseVariants.map((v: any) => {
       const sv = shopVariantMap.get(String(v.id))
       const vStock = hasActiveShop
-        ? (sv ? Number(sv.stock ?? sv.available_quantity ?? 0) : 0)
+        ? (sv
+          ? Number(sv.stock ?? sv.available_quantity ?? 0)
+          : (shopItem ? 0 : Number(v.stock ?? v.available_quantity ?? 0)))
         : Number(v.stock ?? v.available_quantity ?? 0)
 
       return {
@@ -206,7 +208,9 @@ const catalogItems = computed(() => {
     if (hasVariants && variants.length > 0) {
       stock = variants.reduce((sum: number, v: any) => sum + (Number(v.stock) || 0), 0)
     } else {
-      stock = shopItem ? Number(shopItem.available_quantity ?? shopItem.quantity_on_hand ?? 0) : 0
+      stock = shopItem
+        ? Number(shopItem.available_quantity ?? shopItem.quantity_on_hand ?? 0)
+        : Number(productItem?.available_quantity ?? productItem?.quantity_on_hand ?? 0)
     }
 
     return {
