@@ -303,7 +303,7 @@ const hasActiveFilters = computed(() => {
 </script>
 
 <template>
-  <div class="space-y-5 sm:space-y-6 pb-12 font-sans max-w-7xl mx-auto px-3 sm:px-6">
+  <div class="w-full min-w-0 space-y-5 sm:space-y-6 pb-12 font-sans max-w-7xl mx-auto px-3 sm:px-6">
     <!-- Header Section -->
     <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
       <div>

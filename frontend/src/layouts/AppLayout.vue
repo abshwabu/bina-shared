@@ -40,10 +40,10 @@ const isPosRoute = computed(() => {
         class="flex-1 min-h-0 flex flex-col"
         :class="isPosRoute
           ? 'overflow-hidden p-1 sm:p-2 lg:p-2.5'
-          : 'overflow-auto p-4 lg:p-6 custom-scrollbar'"
+          : 'overflow-y-auto overflow-x-hidden p-4 lg:p-6 custom-scrollbar'"
       >
         <div
-          class="flex-1 min-h-0 flex flex-col w-full"
+          class="flex-1 min-h-0 min-w-0 flex flex-col w-full"
           :class="isPosRoute ? 'h-full' : 'max-w-7xl mx-auto'"
         >
           <router-view />
