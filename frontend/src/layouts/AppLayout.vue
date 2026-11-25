@@ -37,7 +37,7 @@ const isPosRoute = computed(() => {
 
       <!-- Main container (auto-adapts for POS without duplicate router-views) -->
       <main
-        class="flex-1 min-h-0 flex flex-col"
+        class="flex-1 min-h-0 min-w-0 w-0 flex flex-col"
         :class="isPosRoute
           ? 'overflow-hidden p-1 sm:p-2 lg:p-2.5'
           : 'overflow-y-auto overflow-x-hidden p-4 lg:p-6 custom-scrollbar'"

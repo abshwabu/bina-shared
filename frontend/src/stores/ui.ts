@@ -7,7 +7,7 @@ export interface Breadcrumb {
 }
 
 export const useUIStore = defineStore('ui', () => {
-  const sidebarOpen = ref(true)
+  const sidebarOpen = ref(typeof window === 'undefined' || window.innerWidth >= 1024)
   const activeModule = ref('dashboard')
   const pageTitle = ref('Dashboard')
   const breadcrumbs = ref<Breadcrumb[]>([])
