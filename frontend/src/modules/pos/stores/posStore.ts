@@ -3,6 +3,7 @@ import { ref, watch } from 'vue'
 import { useStorage } from '@vueuse/core'
 import { posApi, type PosSession } from '@/api/pos'
 import { shopsApi, type Shop } from '@/api/shops'
+import { offlineStorage } from '@/services/offlineStorage'
 
 export interface PosCartItem {
   id: string
@@ -316,8 +317,9 @@ export const usePosStore = defineStore('pos', () => {
     try {
       const res = await shopsApi.getMyShops()
       availableShops.value = res.data
+      await offlineStorage.saveCollectionItems('shops', availableShops.value)
     } catch {
-      availableShops.value = []
+      availableShops.value = await offlineStorage.getCollectionItems('shops') as Shop[]
     }
     return availableShops.value
   }

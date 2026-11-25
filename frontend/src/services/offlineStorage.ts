@@ -195,9 +195,11 @@ class OfflineStorage {
       const store = tx.objectStore('collections')
 
       for (const item of items) {
-        if (item && item.id) {
+        // Stock endpoints identify rows by product_id rather than id.
+        const itemId = item?.id ?? item?.product_id
+        if (item && itemId) {
           store.put({
-            id: `${type}_${item.id}`,
+            id: `${type}_${itemId}`,
             type,
             data: item,
             savedAt: Date.now(),

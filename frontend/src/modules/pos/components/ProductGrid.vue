@@ -4,6 +4,7 @@ import { useI18n } from 'vue-i18n'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { inventoryApi } from '@/api/inventory'
 import { shopsApi } from '@/api/shops'
+import { offlineStorage } from '@/services/offlineStorage'
 import { usePosStore } from '../stores/posStore'
 import { Search, Package, Check, Layers, Store } from '@lucide/vue'
 import { resolveImageUrl } from '@/utils/format'
@@ -67,12 +68,13 @@ const { data: categories, isLoading: isCategoriesLoading } = useQuery<any[]>({
   queryFn: async () => {
     try {
       const res: any = await inventoryApi.getCategories()
-      if (Array.isArray(res.data)) return res.data
-      if (Array.isArray(res.data?.data)) return res.data.data
-      return []
+      const data = Array.isArray(res.data) ? res.data : (Array.isArray(res.data?.data) ? res.data.data : [])
+      if (data.length > 0) await offlineStorage.saveCollectionItems('categories', data)
+      return data
     } catch (e) {
-      console.warn('POS: unable to fetch categories, defaulting to empty list', e)
-      return []
+      const cached = await offlineStorage.getCollectionItems('categories')
+      console.warn('POS: using cached categories', e)
+      return cached
     }
   },
   staleTime: 1000 * 60 * 5,
@@ -86,12 +88,13 @@ const { data: shopStock, isLoading: isShopStockLoading, refetch: refetchStock } 
     if (!shopId.value) return []
     try {
       const res: any = await shopsApi.getStock(shopId.value)
-      if (Array.isArray(res.data)) return res.data
-      if (Array.isArray(res.data?.data)) return res.data.data
-      return []
+      const data = Array.isArray(res.data) ? res.data : (Array.isArray(res.data?.data) ? res.data.data : [])
+      if (data.length > 0) await offlineStorage.saveCollectionItems(`shop-stock:${shopId.value}`, data)
+      return data
     } catch (e) {
-      console.warn('POS: unable to fetch shop stock, defaulting to empty list', e)
-      return []
+      const cached = await offlineStorage.getCollectionItems(`shop-stock:${shopId.value}`)
+      console.warn('POS: using cached shop stock', e)
+      return cached
     }
   },
   enabled: computed(() => !!shopId.value),
@@ -105,13 +108,14 @@ const { data: products, isLoading: isProductsLoading } = useQuery<any[]>({
   queryKey: ['inventory', 'products-pos'],
   queryFn: async () => {
     try {
-      const res: any = await inventoryApi.getProducts({ status: 'active' }, 1)
-      if (Array.isArray(res.data?.data)) return res.data.data
-      if (Array.isArray(res.data)) return res.data
-      return []
+      const res: any = await inventoryApi.getProducts({ status: 'active', per_page: 100 }, 1)
+      const data = Array.isArray(res.data?.data) ? res.data.data : (Array.isArray(res.data) ? res.data : [])
+      if (data.length > 0) await offlineStorage.saveCollectionItems('products', data)
+      return data
     } catch (e) {
-      console.warn('POS: unable to fetch catalog products, defaulting to empty list', e)
-      return []
+      const cached = await offlineStorage.getCollectionItems('products')
+      console.warn('POS: using cached catalog products', e)
+      return cached
     }
   },
   staleTime: 1000 * 30,

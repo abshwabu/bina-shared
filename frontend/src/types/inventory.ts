@@ -117,6 +117,7 @@ export interface ProductFilters {
   category_id?: string
   status?: ProductStatus | ''
   type?: ProductType | ''
+  per_page?: number
 }
 
 export interface StockFilters {

@@ -44,6 +44,7 @@ export const inventoryApi = {
           category_id: filters.category_id || undefined,
           status: filters.status || undefined,
           type: filters.type || undefined,
+          per_page: filters.per_page || undefined,
         },
       })
       .then((res) => ({ ...res, data: asPaginated<Product>(res.data) }))
