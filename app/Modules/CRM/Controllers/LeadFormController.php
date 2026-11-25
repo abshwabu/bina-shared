@@ -1,0 +1,270 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Modules\CRM\Controllers;
+
+use App\Http\Controllers\BaseController;
+use App\Modules\CRM\Models\Lead;
+use App\Modules\CRM\Models\LeadForm;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Str;
+
+class LeadFormController extends BaseController
+{
+    // ── Public Endpoints (Accessible by external leads & website embeds) ────────
+
+    public function publicShow(string $idOrSlug): JsonResponse
+    {
+        $query = LeadForm::query();
+
+        if (Str::isUuid($idOrSlug)) {
+            $query->where(function ($q) use ($idOrSlug) {
+                $q->where('id', $idOrSlug)->orWhere('slug', $idOrSlug);
+            });
+        } else {
+            $query->where('slug', $idOrSlug);
+        }
+
+        $form = $query->where('is_active', true)->firstOrFail();
+
+        // Increment views count
+        $form->increment('views_count');
+
+        return response()->json([
+            'data' => $form,
+            'company' => [
+                'name' => config('app.name', 'ERP System'),
+            ],
+        ]);
+    }
+
+    public function publicSubmit(Request $request, string $idOrSlug): JsonResponse
+    {
+        $query = LeadForm::query();
+
+        if (Str::isUuid($idOrSlug)) {
+            $query->where(function ($q) use ($idOrSlug) {
+                $q->where('id', $idOrSlug)->orWhere('slug', $idOrSlug);
+            });
+        } else {
+            $query->where('slug', $idOrSlug);
+        }
+
+        $form = $query->where('is_active', true)->firstOrFail();
+
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'email' => ['nullable', 'email', 'max:255'],
+            'phone' => ['nullable', 'string', 'max:50'],
+            'company' => ['nullable', 'string', 'max:255'],
+            'title' => ['nullable', 'string', 'max:255'],
+            'custom_responses' => ['nullable', 'array'],
+            'notes' => ['nullable', 'string'],
+        ]);
+
+        $customResponses = $validated['custom_responses'] ?? [];
+
+        // Also check raw string JSON if submitted from multipart/form-data
+        if (is_string($customResponses)) {
+            $customResponses = json_decode($customResponses, true) ?: [];
+        }
+
+        // Automatically extract the estimated value / budget from the form answers
+        $defaultVal = $form->default_estimated_value ? (float) $form->default_estimated_value : null;
+        $estimatedValue = $this->parseEstimatedValue($customResponses, $defaultVal);
+
+        $lead = Lead::create([
+            'lead_form_id' => $form->id,
+            'name' => $validated['name'],
+            'company' => $validated['company'] ?? null,
+            'title' => $validated['title'] ?? null,
+            'email' => $validated['email'] ?? null,
+            'phone' => $validated['phone'] ?? null,
+            'source' => $form->source ?: 'website',
+            'status' => 'new',
+            'priority' => $form->default_priority ?: 'medium',
+            'estimated_value' => $estimatedValue,
+            'assigned_to_user_id' => $form->assigned_to_user_id,
+            'notes' => $validated['notes'] ?? null,
+            'custom_form_responses' => $customResponses,
+        ]);
+
+        // Increment submissions count
+        $form->increment('submissions_count');
+
+        // Broadcast to integrated webhooks, Slack, and automation connectors
+        \App\Modules\Integrations\Services\IntegrationDispatcherService::dispatch('lead.captured', [
+            'lead_id'          => $lead->id,
+            'name'             => $lead->name,
+            'email'            => $lead->email,
+            'phone'            => $lead->phone,
+            'company'          => $lead->company,
+            'source'           => $lead->source,
+            'estimated_budget' => $lead->estimated_value,
+            'captured_at'      => now()->toIso8601String(),
+        ]);
+
+        return response()->json([
+            'message' => $form->thank_you_message ?: 'Thank you! Your inquiry has been received. Our team will get in touch shortly.',
+            'thank_you_title' => $form->thank_you_title ?: 'Thank You!',
+            'redirect_url' => $form->redirect_url,
+            'lead_id' => $lead->id,
+        ], 201);
+    }
+
+    /**
+     * Helper to extract numerical estimated budget from user form responses.
+     */
+    private function parseEstimatedValue(array $responses, ?float $default = null): ?float
+    {
+        // 1. Search for fields explicitly mentioning budget, value, amount, or price
+        foreach ($responses as $key => $value) {
+            $normalizedKey = strtolower((string) $key);
+            if (
+                str_contains($normalizedKey, 'budget') ||
+                str_contains($normalizedKey, 'amount') ||
+                str_contains($normalizedKey, 'value') ||
+                str_contains($normalizedKey, 'price') ||
+                str_contains($normalizedKey, 'cost')
+            ) {
+                $parsed = $this->extractNumericValue((string) (is_array($value) ? implode(' ', $value) : $value));
+                if ($parsed !== null && $parsed > 0) {
+                    return $parsed;
+                }
+            }
+        }
+
+        // 2. Search for any field answer that has currency symbols ($) or budget ranges
+        foreach ($responses as $key => $value) {
+            if (is_string($value) && (str_contains($value, '$') || preg_match('/\b\d{1,3}(,\d{3})+(\.\d+)?\b/', $value))) {
+                $parsed = $this->extractNumericValue($value);
+                if ($parsed !== null && $parsed > 0) {
+                    return $parsed;
+                }
+            }
+        }
+
+        return $default;
+    }
+
+    /**
+     * Extracts a numeric float from string ranges like "$5,000 - $20,000", "$50,000+", "15000".
+     */
+    private function extractNumericValue(string $val): ?float
+    {
+        $clean = str_replace(',', '', $val);
+        preg_match_all('/\d+(\.\d+)?/', $clean, $matches);
+
+        if (!empty($matches[0])) {
+            $numbers = array_map('floatval', $matches[0]);
+            // If range like 5000 - 20000, take the upper target bound
+            return max($numbers);
+        }
+
+        return null;
+    }
+
+    // ── Authenticated Internal Endpoints ─────────────────────────────────────────
+
+    public function index(Request $request): JsonResponse
+    {
+        $query = LeadForm::with(['assignedUser'])
+            ->withCount('leads');
+
+        if ($request->filled('source') && $request->input('source') !== 'all') {
+            $query->where('source', $request->input('source'));
+        }
+
+        if ($request->filled('form_type') && $request->input('form_type') !== 'all') {
+            $query->where('form_type', $request->input('form_type'));
+        }
+
+        if ($request->filled('search')) {
+            $search = '%' . $request->input('search') . '%';
+            $query->where(function ($q) use ($search) {
+                $q->where('title', 'like', $search)
+                  ->orWhere('headline', 'like', $search);
+            });
+        }
+
+        $forms = $query->orderByDesc('created_at')->get();
+
+        return $this->successResponse($forms);
+    }
+
+    public function store(Request $request): JsonResponse
+    {
+        $validated = $request->validate([
+            'title' => ['required', 'string', 'max:255'],
+            'source' => ['required', 'string', 'max:50'],
+            'form_type' => ['required', 'string', 'in:wizard,classic_embed'],
+            'headline' => ['nullable', 'string', 'max:255'],
+            'description' => ['nullable', 'string'],
+            'custom_questions' => ['nullable', 'array'],
+            'thank_you_title' => ['nullable', 'string', 'max:255'],
+            'thank_you_message' => ['nullable', 'string'],
+            'redirect_url' => ['nullable', 'string', 'max:255'],
+            'default_priority' => ['nullable', 'string', 'in:low,medium,high,urgent'],
+            'default_estimated_value' => ['nullable', 'numeric', 'min:0'],
+            'assigned_to_user_id' => ['nullable', 'uuid'],
+            'is_active' => ['nullable', 'boolean'],
+            'theme_color' => ['nullable', 'string', 'max:30'],
+        ]);
+
+        $validated['created_by_user_id'] = $request->user()?->id;
+
+        $form = LeadForm::create($validated);
+
+        return $this->createdResponse($form->load(['assignedUser']));
+    }
+
+    public function show(string $id): JsonResponse
+    {
+        $form = LeadForm::with([
+            'assignedUser',
+            'leads' => function ($q) {
+                $q->orderByDesc('created_at')->limit(20);
+            },
+        ])
+        ->withCount('leads')
+        ->findOrFail($id);
+
+        return $this->successResponse($form);
+    }
+
+    public function update(Request $request, string $id): JsonResponse
+    {
+        $form = LeadForm::findOrFail($id);
+
+        $validated = $request->validate([
+            'title' => ['sometimes', 'required', 'string', 'max:255'],
+            'source' => ['sometimes', 'required', 'string', 'max:50'],
+            'form_type' => ['sometimes', 'required', 'string', 'in:wizard,classic_embed'],
+            'headline' => ['nullable', 'string', 'max:255'],
+            'description' => ['nullable', 'string'],
+            'custom_questions' => ['nullable', 'array'],
+            'thank_you_title' => ['nullable', 'string', 'max:255'],
+            'thank_you_message' => ['nullable', 'string'],
+            'redirect_url' => ['nullable', 'string', 'max:255'],
+            'default_priority' => ['nullable', 'string', 'in:low,medium,high,urgent'],
+            'default_estimated_value' => ['nullable', 'numeric', 'min:0'],
+            'assigned_to_user_id' => ['nullable', 'uuid'],
+            'is_active' => ['nullable', 'boolean'],
+            'theme_color' => ['nullable', 'string', 'max:30'],
+        ]);
+
+        $form->update($validated);
+
+        return $this->successResponse($form->fresh(['assignedUser']));
+    }
+
+    public function destroy(string $id): JsonResponse
+    {
+        $form = LeadForm::findOrFail($id);
+        $form->delete();
+
+        return $this->successResponse(['message' => 'Lead form deleted successfully.']);
+    }
+}

@@ -1,0 +1,713 @@
+<script setup lang="ts">
+import { computed, ref, markRaw } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useQuery, useMutation, useQueryClient } from '@tanstack/vue-query'
+import { rolesApi, usersApi, type Role, type AppUser } from '@/api/roles'
+import UiButton from '@/components/ui/UiButton.vue'
+import UiInput from '@/components/ui/UiInput.vue'
+import UiSelect from '@/components/ui/UiSelect.vue'
+import UiModal from '@/components/ui/UiModal.vue'
+import UiBadge from '@/components/ui/UiBadge.vue'
+import UiStat from '@/components/ui/UiStat.vue'
+import UiSpinner from '@/components/ui/UiSpinner.vue'
+import {
+  Users,
+  Shield,
+  Plus,
+  Pencil,
+  Trash2,
+  Search,
+  CheckCircle2,
+  XCircle,
+  KeyRound,
+  UserCheck,
+  UserX,
+  Lock,
+  Mail,
+  Edit2,
+  CheckSquare,
+  Square,
+  Layers,
+} from '@lucide/vue'
+import { useToast } from '@/composables/useToast'
+
+const queryClient = useQueryClient()
+const toast = useToast()
+const { t } = useI18n()
+
+const activeTab = ref<'users' | 'roles'>('users')
+
+// --- Users State ---
+const userSearchQuery = ref('')
+const selectedRoleFilter = ref<string>('all')
+const isUserModalOpen = ref(false)
+const isDeleteUserModalOpen = ref(false)
+const editingUser = ref<AppUser | null>(null)
+const userToDelete = ref<AppUser | null>(null)
+
+const userForm = ref({
+  name: '',
+  email: '',
+  password: '',
+  roles: [] as string[],
+  is_active: true,
+})
+
+// --- Roles State ---
+const isRoleModalOpen = ref(false)
+const isDeleteRoleModalOpen = ref(false)
+const editingRole = ref<Role | null>(null)
+const roleToDelete = ref<Role | null>(null)
+const roleName = ref('')
+const selectedPermissions = ref<string[]>([])
+
+// --- Queries ---
+const { data: users, isLoading: isLoadingUsers } = useQuery({
+  queryKey: ['core', 'users'],
+  queryFn: () => usersApi.list().then((res) => res.data.data),
+})
+
+const { data: roles, isLoading: isLoadingRoles } = useQuery({
+  queryKey: ['core', 'roles'],
+  queryFn: () => rolesApi.list().then((res) => res.data.data),
+})
+
+const { data: serverPermissions } = useQuery({
+  queryKey: ['core', 'permissions'],
+  queryFn: () => rolesApi.permissions().then((res) => res.data.data).catch(() => [] as string[]),
+})
+
+// --- Computed Stats & Filters ---
+const userStats = computed(() => {
+  const list = users.value || []
+  const active = list.filter((u) => u.is_active).length
+  const suspended = list.filter((u) => !u.is_active).length
+  const totalRoles = roles.value?.length || 0
+
+  return [
+    {
+      label: t('roles.stats.teamMembers'),
+      value: list.length,
+      icon: markRaw(Users),
+    },
+    {
+      label: t('roles.stats.activeAccounts'),
+      value: active,
+      icon: markRaw(UserCheck),
+    },
+    {
+      label: t('roles.stats.suspendedAccounts'),
+      value: suspended,
+      icon: markRaw(UserX),
+    },
+    {
+      label: t('roles.stats.definedRoles'),
+      value: totalRoles,
+      icon: markRaw(Shield),
+    },
+  ]
+})
+
+const filteredUsers = computed(() => {
+  let list = users.value || []
+  if (selectedRoleFilter.value !== 'all') {
+    list = list.filter((u) => u.roles.includes(selectedRoleFilter.value))
+  }
+  if (userSearchQuery.value) {
+    const q = userSearchQuery.value.toLowerCase()
+    list = list.filter(
+      (u) =>
+        u.name.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q) ||
+        u.roles.some((r) => r.toLowerCase().includes(q))
+    )
+  }
+  return list
+})
+
+const allPermissions = computed(() => {
+  const set = new Set<string>()
+  ;(serverPermissions.value || []).forEach((p) => set.add(p))
+  ;(roles.value || []).forEach((role) => role.permissions.forEach((p) => set.add(p)))
+  return Array.from(set).sort()
+})
+
+const groupedPermissions = computed(() => {
+  const groups: Record<string, string[]> = {}
+  allPermissions.value.forEach((p) => {
+    const prefix = p.split('.')[0]?.toUpperCase() || 'OTHER'
+    if (!groups[prefix]) {
+      groups[prefix] = []
+    }
+    groups[prefix].push(p)
+  })
+  return groups
+})
+
+// --- User Mutations ---
+const saveUserMutation = useMutation({
+  mutationFn: (payload: any) => {
+    if (editingUser.value) {
+      return usersApi.update(editingUser.value.id, payload)
+    }
+    return usersApi.create(payload)
+  },
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['core', 'users'] })
+    isUserModalOpen.value = false
+    toast.success(editingUser.value ? t('roles.messages.userUpdated') : t('roles.messages.userCreated'))
+  },
+  onError: (err: any) => {
+    toast.error(err?.response?.data?.message || t('roles.messages.failedSaveUser'))
+  },
+})
+
+const toggleUserStatusMutation = useMutation({
+  mutationFn: (id: string) => usersApi.toggleStatus(id),
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['core', 'users'] })
+    toast.success(t('roles.messages.statusUpdated'))
+  },
+  onError: (err: any) => {
+    toast.error(err?.response?.data?.message || t('roles.messages.failedToggleStatus'))
+  },
+})
+
+const deleteUserMutation = useMutation({
+  mutationFn: (id: string) => usersApi.delete(id),
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['core', 'users'] })
+    isDeleteUserModalOpen.value = false
+    userToDelete.value = null
+    toast.success(t('roles.messages.userDeleted'))
+  },
+  onError: (err: any) => {
+    toast.error(err?.response?.data?.message || t('roles.messages.failedDeleteUser'))
+  },
+})
+
+// --- Role Mutations ---
+const saveRoleMutation = useMutation({
+  mutationFn: async () => {
+    if (editingRole.value) {
+      await rolesApi.update(editingRole.value.id, roleName.value)
+      await rolesApi.syncPermissions(editingRole.value.id, selectedPermissions.value)
+    } else {
+      const created = await rolesApi.create(roleName.value)
+      const id = created.data.data?.id ?? (created.data as any).id
+      if (id && selectedPermissions.value.length) {
+        await rolesApi.syncPermissions(id, selectedPermissions.value)
+      }
+    }
+  },
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['core', 'roles'] })
+    isRoleModalOpen.value = false
+    toast.success(editingRole.value ? t('roles.messages.roleUpdated') : t('roles.messages.roleCreated'))
+  },
+  onError: (err: any) => {
+    toast.error(err?.response?.data?.message || t('roles.messages.failedSaveRole'))
+  },
+})
+
+const deleteRoleMutation = useMutation({
+  mutationFn: (id: number) => rolesApi.destroy(id),
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['core', 'roles'] })
+    isDeleteRoleModalOpen.value = false
+    roleToDelete.value = null
+    toast.success(t('roles.messages.roleDeleted'))
+  },
+  onError: (err: any) => {
+    toast.error(err?.response?.data?.message || t('roles.messages.failedDeleteRole'))
+  },
+})
+
+// --- Handlers ---
+function openCreateUser() {
+  editingUser.value = null
+  userForm.value = {
+    name: '',
+    email: '',
+    password: '',
+    roles: [],
+    is_active: true,
+  }
+  isUserModalOpen.value = true
+}
+
+function openEditUser(user: AppUser) {
+  editingUser.value = user
+  userForm.value = {
+    name: user.name,
+    email: user.email,
+    password: '',
+    roles: [...user.roles],
+    is_active: user.is_active,
+  }
+  isUserModalOpen.value = true
+}
+
+function openDeleteUserConfirm(user: AppUser) {
+  userToDelete.value = user
+  isDeleteUserModalOpen.value = true
+}
+
+function handleSaveUser() {
+  if (!userForm.value.name || !userForm.value.email) {
+    toast.error(t('roles.messages.nameEmailRequired'))
+    return
+  }
+  if (!editingUser.value && !userForm.value.password) {
+    toast.error(t('roles.messages.passwordRequired'))
+    return
+  }
+
+  const payload: any = {
+    name: userForm.value.name,
+    email: userForm.value.email,
+    roles: userForm.value.roles,
+    is_active: userForm.value.is_active,
+  }
+  if (userForm.value.password) {
+    payload.password = userForm.value.password
+  }
+
+  saveUserMutation.mutate(payload)
+}
+
+function openCreateRole() {
+  editingRole.value = null
+  roleName.value = ''
+  selectedPermissions.value = []
+  isRoleModalOpen.value = true
+}
+
+function openEditRole(role: Role) {
+  editingRole.value = role
+  roleName.value = role.name
+  selectedPermissions.value = [...role.permissions]
+  isRoleModalOpen.value = true
+}
+
+function openDeleteRoleConfirm(role: Role) {
+  roleToDelete.value = role
+  isDeleteRoleModalOpen.value = true
+}
+
+function togglePermission(permission: string) {
+  if (selectedPermissions.value.includes(permission)) {
+    selectedPermissions.value = selectedPermissions.value.filter((p) => p !== permission)
+  } else {
+    selectedPermissions.value = [...selectedPermissions.value, permission]
+  }
+}
+
+function toggleModulePermissions(moduleName: string) {
+  const perms = groupedPermissions.value[moduleName] || []
+  const allSelected = perms.every((p) => selectedPermissions.value.includes(p))
+  if (allSelected) {
+    selectedPermissions.value = selectedPermissions.value.filter((p) => !perms.includes(p))
+  } else {
+    const combined = new Set([...selectedPermissions.value, ...perms])
+    selectedPermissions.value = Array.from(combined)
+  }
+}
+
+function selectAllPermissions() {
+  selectedPermissions.value = [...allPermissions.value]
+}
+
+function clearAllPermissions() {
+  selectedPermissions.value = []
+}
+</script>
+
+<template>
+  <div class="space-y-6 max-w-6xl">
+    <!-- Header -->
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900">{{ t('roles.title') }}</h1>
+        <p class="text-xs sm:text-sm text-slate-500">{{ t('roles.subtitle') }}</p>
+      </div>
+
+      <div class="flex items-center gap-2">
+        <UiButton v-if="activeTab === 'users'" @click="openCreateUser">
+          <Plus class="w-4 h-4 mr-1.5" /> {{ t('roles.addMember') }}
+        </UiButton>
+        <UiButton v-else @click="openCreateRole">
+          <Plus class="w-4 h-4 mr-1.5" /> {{ t('roles.createRole') }}
+        </UiButton>
+      </div>
+    </div>
+
+    <!-- Stats -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <UiStat
+        v-for="stat in userStats"
+        :key="stat.label"
+        :label="stat.label"
+        :value="stat.value"
+        :icon="stat.icon"
+      />
+    </div>
+
+    <!-- Tabbed Navigation -->
+    <div class="flex items-center gap-1.5 border-b border-slate-200 pb-2">
+      <button
+        type="button"
+        @click="activeTab = 'users'"
+        class="px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-2"
+        :class="activeTab === 'users' ? 'bg-slate-900 text-white shadow-xs' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'"
+      >
+        <Users class="w-3.5 h-3.5" /> {{ t('roles.tabs.teamMembers') }} ({{ users?.length || 0 }})
+      </button>
+
+      <button
+        type="button"
+        @click="activeTab = 'roles'"
+        class="px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer flex items-center gap-2"
+        :class="activeTab === 'roles' ? 'bg-slate-900 text-white shadow-xs' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'"
+      >
+        <Shield class="w-3.5 h-3.5" /> {{ t('roles.tabs.rolesPermissions') }} ({{ roles?.length || 0 }})
+      </button>
+    </div>
+
+    <!-- 1. Users Tab -->
+    <div v-if="activeTab === 'users'" class="space-y-4">
+      <!-- Search & Filters -->
+      <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs">
+        <div class="flex items-center gap-1.5 overflow-x-auto pb-1 max-w-xl">
+          <button
+            type="button"
+            @click="selectedRoleFilter = 'all'"
+            class="px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all cursor-pointer"
+            :class="selectedRoleFilter === 'all' ? 'bg-slate-900 text-white shadow-xs' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'"
+          >
+            {{ t('roles.filters.allRoles') }}
+          </button>
+          <button
+            v-for="r in roles"
+            :key="r.id"
+            type="button"
+            @click="selectedRoleFilter = r.name"
+            class="px-3 py-1.5 rounded-xl text-xs font-bold whitespace-nowrap transition-all cursor-pointer capitalize"
+            :class="selectedRoleFilter === r.name ? 'bg-slate-900 text-white shadow-xs' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'"
+          >
+            {{ r.name }}
+          </button>
+        </div>
+
+        <UiInput
+          v-model="userSearchQuery"
+          :placeholder="t('roles.filters.searchPlaceholder')"
+          size="sm"
+          class="w-full sm:w-64"
+        >
+          <template #prefix><Search class="w-3.5 h-3.5 text-slate-400" /></template>
+        </UiInput>
+      </div>
+
+      <!-- Users Table -->
+      <div v-if="isLoadingUsers" class="p-16 flex justify-center">
+        <UiSpinner size="lg" />
+      </div>
+
+      <div v-else class="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+        <div v-if="filteredUsers.length" class="overflow-x-auto">
+          <table class="min-w-full divide-y divide-slate-100 text-xs">
+            <thead class="bg-slate-50 text-slate-500 font-bold uppercase tracking-wider text-[10px]">
+              <tr>
+                <th class="px-4 py-3 text-left">{{ t('roles.table.memberProfile') }}</th>
+                <th class="px-4 py-3 text-left">{{ t('roles.table.assignedRoles') }}</th>
+                <th class="px-4 py-3 text-center">{{ t('roles.table.accountStatus') }}</th>
+                <th class="px-4 py-3 text-right">{{ t('roles.table.createdDate') }}</th>
+                <th class="px-4 py-3 text-right">{{ t('roles.table.actions') }}</th>
+              </tr>
+            </thead>
+            <tbody class="divide-y divide-slate-100 text-slate-700">
+              <tr v-for="user in filteredUsers" :key="user.id" class="hover:bg-slate-50/70 transition-colors">
+                <td class="px-4 py-3">
+                  <div class="font-bold text-slate-900 text-sm">{{ user.name }}</div>
+                  <div class="text-[11px] text-slate-500 font-mono">{{ user.email }}</div>
+                </td>
+
+                <td class="px-4 py-3">
+                  <div class="flex flex-wrap gap-1">
+                    <span
+                      v-for="r in user.roles"
+                      :key="r"
+                      class="px-2 py-0.5 rounded-md text-[10px] font-bold bg-primary-50 text-primary-700 border border-primary-100 capitalize"
+                    >
+                      {{ r }}
+                    </span>
+                    <span v-if="!user.roles?.length" class="text-xs text-slate-400 italic">{{ t('roles.table.noRoles') }}</span>
+                  </div>
+                </td>
+
+                <td class="px-4 py-3 text-center">
+                  <button
+                    type="button"
+                    @click="toggleUserStatusMutation.mutate(user.id)"
+                    class="cursor-pointer inline-flex items-center gap-1 font-bold text-[10px] px-2 py-0.5 rounded-full transition-all"
+                    :class="user.is_active ? 'bg-emerald-50 text-emerald-700 border border-emerald-200' : 'bg-slate-100 text-slate-500 border border-slate-200'"
+                    :title="user.is_active ? t('roles.table.clickDeactivate') : t('roles.table.clickActivate')"
+                  >
+                    <span class="w-1.5 h-1.5 rounded-full" :class="user.is_active ? 'bg-emerald-500' : 'bg-slate-400'"></span>
+                    {{ user.is_active ? t('roles.table.active') : t('roles.table.suspended') }}
+                  </button>
+                </td>
+
+                <td class="px-4 py-3 text-right text-slate-500 font-mono">
+                  {{ new Date(user.created_at).toLocaleDateString() }}
+                </td>
+
+                <td class="px-4 py-3 text-right space-x-1 whitespace-nowrap">
+                  <UiButton variant="ghost" size="sm" @click="openEditUser(user)">
+                    <Edit2 class="w-3.5 h-3.5" />
+                  </UiButton>
+                  <UiButton variant="ghost" size="sm" class="text-red-500 hover:text-red-700 hover:bg-red-50" @click="openDeleteUserConfirm(user)">
+                    <Trash2 class="w-3.5 h-3.5" />
+                  </UiButton>
+                </td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div v-else class="p-12 text-center text-slate-400 text-xs">
+          {{ t('roles.table.noUsersFound') }}
+        </div>
+      </div>
+    </div>
+
+    <!-- 2. Roles Tab -->
+    <div v-else-if="activeTab === 'roles'" class="space-y-4">
+      <div v-if="isLoadingRoles" class="p-16 flex justify-center">
+        <UiSpinner size="lg" />
+      </div>
+
+      <div v-else class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+        <div
+          v-for="role in roles"
+          :key="role.id"
+          class="bg-white rounded-2xl border border-slate-200 p-5 shadow-xs flex flex-col justify-between space-y-4"
+        >
+          <div class="space-y-2">
+            <div class="flex items-center justify-between">
+              <div class="flex items-center gap-2">
+                <Shield class="w-4 h-4 text-primary-600" />
+                <h3 class="font-bold text-slate-900 text-base capitalize">{{ role.name }}</h3>
+              </div>
+              <span class="text-[10px] font-bold bg-slate-100 text-slate-600 px-2 py-0.5 rounded-full">
+                {{ t('roles.rolesGrid.permissionsCount', { count: role.permissions.length }) }}
+              </span>
+            </div>
+
+            <p class="text-xs text-slate-500">
+              {{ t('roles.rolesGrid.grantsDesc') }}
+            </p>
+
+            <div class="flex flex-wrap gap-1 pt-1 max-h-24 overflow-y-auto pr-1">
+              <span
+                v-for="p in role.permissions.slice(0, 8)"
+                :key="p"
+                class="text-[9px] font-mono bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded border border-slate-200"
+              >
+                {{ p }}
+              </span>
+              <span v-if="role.permissions.length > 8" class="text-[9px] font-bold text-slate-400 self-center">
+                {{ t('roles.rolesGrid.morePermissions', { count: role.permissions.length - 8 }) }}
+              </span>
+            </div>
+          </div>
+
+          <div class="pt-3 border-t border-slate-100 flex items-center justify-end gap-2">
+            <UiButton variant="outline" size="sm" @click="openEditRole(role)">
+              <Pencil class="w-3.5 h-3.5 mr-1" /> {{ t('roles.rolesGrid.configurePermissions') }}
+            </UiButton>
+            <UiButton variant="ghost" size="sm" class="text-red-500 hover:text-red-700" @click="openDeleteRoleConfirm(role)">
+              <Trash2 class="w-3.5 h-3.5" />
+            </UiButton>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Create / Edit User Modal -->
+    <UiModal v-model="isUserModalOpen" :title="editingUser ? t('roles.userModal.editTitle') : t('roles.userModal.createTitle')" size="md">
+      <div class="space-y-4">
+        <UiInput v-model="userForm.name" :label="t('roles.userModal.fullName')" :placeholder="t('roles.userModal.fullNamePlaceholder')" required />
+        <UiInput v-model="userForm.email" :label="t('roles.userModal.email')" type="email" :placeholder="t('roles.userModal.emailPlaceholder')" required />
+
+        <UiInput
+          v-model="userForm.password"
+          :label="t('roles.userModal.password')"
+          type="password"
+          :placeholder="editingUser ? t('roles.userModal.passwordEditPlaceholder') : t('roles.userModal.passwordCreatePlaceholder')"
+          :required="!editingUser"
+        />
+
+        <div class="space-y-2">
+          <label class="block text-xs font-bold uppercase tracking-wider text-slate-700">{{ t('roles.userModal.assignRoles') }}</label>
+          <div class="grid grid-cols-2 gap-2 p-3 bg-slate-50 rounded-xl border border-slate-200 max-h-40 overflow-y-auto">
+            <label
+              v-for="r in roles"
+              :key="r.id"
+              class="flex items-center gap-2 text-xs font-semibold text-slate-700 capitalize cursor-pointer hover:text-slate-900"
+            >
+              <input
+                type="checkbox"
+                class="rounded border-slate-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                :value="r.name"
+                v-model="userForm.roles"
+              />
+              <span>{{ r.name }}</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="flex items-center gap-2 pt-1">
+          <input
+            id="user_active_checkbox"
+            v-model="userForm.is_active"
+            type="checkbox"
+            class="h-4 w-4 rounded border-slate-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+          />
+          <label for="user_active_checkbox" class="text-xs text-slate-700 font-semibold cursor-pointer">
+            {{ t('roles.userModal.isActiveLabel') }}
+          </label>
+        </div>
+
+        <div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+          <UiButton variant="outline" type="button" @click="isUserModalOpen = false">{{ t('roles.userModal.cancel') }}</UiButton>
+          <UiButton :loading="saveUserMutation.isPending.value" @click="handleSaveUser">
+            {{ editingUser ? t('roles.userModal.saveUser') : t('roles.userModal.createUser') }}
+          </UiButton>
+        </div>
+      </div>
+    </UiModal>
+
+    <!-- Create / Edit Role Modal -->
+    <UiModal v-model="isRoleModalOpen" :title="editingRole ? t('roles.roleModal.editTitle', { name: editingRole.name }) : t('roles.roleModal.createTitle')" size="xl">
+      <div class="space-y-4">
+        <UiInput v-model="roleName" :label="t('roles.roleModal.roleName')" :placeholder="t('roles.roleModal.roleNamePlaceholder')" required />
+
+        <div>
+          <div class="flex items-center justify-between mb-2">
+            <p class="text-xs font-bold uppercase tracking-wider text-slate-700">
+              {{ t('roles.roleModal.modulePermissions', { selected: selectedPermissions.length, total: allPermissions.length }) }}
+            </p>
+            <div class="flex items-center gap-2 text-xs">
+              <button type="button" @click="selectAllPermissions" class="font-bold text-primary-600 hover:text-primary-800 cursor-pointer">
+                {{ t('roles.roleModal.selectAll') }}
+              </button>
+              <span class="text-slate-300">•</span>
+              <button type="button" @click="clearAllPermissions" class="font-bold text-slate-500 hover:text-slate-700 cursor-pointer">
+                {{ t('roles.roleModal.clearAll') }}
+              </button>
+            </div>
+          </div>
+
+          <div class="max-h-80 overflow-y-auto border border-slate-200 rounded-2xl p-4 space-y-4 bg-slate-50/50">
+            <div v-for="(perms, moduleName) in groupedPermissions" :key="moduleName" class="space-y-2 bg-white p-3.5 rounded-xl border border-slate-200">
+              <div class="flex items-center justify-between border-b border-slate-100 pb-1.5">
+                <span class="text-xs font-black text-slate-800 tracking-wider">
+                  {{ moduleName }}
+                </span>
+                <button
+                  type="button"
+                  @click="toggleModulePermissions(moduleName)"
+                  class="text-[11px] font-bold text-primary-600 hover:text-primary-800 cursor-pointer"
+                >
+                  {{ t('roles.roleModal.toggleAll') }}
+                </button>
+              </div>
+
+              <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2 pt-1">
+                <label
+                  v-for="permission in perms"
+                  :key="permission"
+                  class="flex items-center gap-2 text-xs text-slate-700 hover:text-slate-900 cursor-pointer"
+                >
+                  <input
+                    type="checkbox"
+                    class="rounded border-slate-300 text-primary-600 focus:ring-primary-500 cursor-pointer"
+                    :checked="selectedPermissions.includes(permission)"
+                    @change="togglePermission(permission)"
+                  />
+                  <span class="font-mono text-[11px] truncate">{{ permission }}</span>
+                </label>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+          <UiButton variant="outline" type="button" @click="isRoleModalOpen = false">{{ t('roles.roleModal.cancel') }}</UiButton>
+          <UiButton :loading="saveRoleMutation.isPending.value" @click="saveRoleMutation.mutate()">
+            {{ editingRole ? t('roles.roleModal.savePermissions') : t('roles.roleModal.createRole') }}
+          </UiButton>
+        </div>
+      </div>
+    </UiModal>
+
+    <!-- Custom Delete User Modal -->
+    <UiModal v-model="isDeleteUserModalOpen" :title="t('roles.deleteUserModal.title')" size="sm">
+      <div v-if="userToDelete" class="space-y-4">
+        <div class="flex items-start gap-3.5 p-3.5 bg-red-50 border border-red-200 rounded-2xl">
+          <div class="p-2 bg-red-100 text-red-600 rounded-xl shrink-0 mt-0.5">
+            <Trash2 class="w-5 h-5" />
+          </div>
+          <div class="space-y-1">
+            <h4 class="text-sm font-bold text-red-950">{{ t('roles.deleteUserModal.confirmTitle') }}</h4>
+            <p class="text-xs text-red-800 leading-relaxed">
+              {{ t('roles.deleteUserModal.confirmMessage', { name: userToDelete.name, email: userToDelete.email }) }}
+            </p>
+          </div>
+        </div>
+
+        <div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+          <UiButton variant="outline" size="sm" type="button" @click="isDeleteUserModalOpen = false">{{ t('roles.deleteUserModal.cancel') }}</UiButton>
+          <UiButton
+            variant="danger"
+            size="sm"
+            :loading="deleteUserMutation.isPending.value"
+            @click="deleteUserMutation.mutate(userToDelete.id)"
+          >
+            <Trash2 class="w-3.5 h-3.5 mr-1" /> {{ t('roles.deleteUserModal.deleteButton') }}
+          </UiButton>
+        </div>
+      </div>
+    </UiModal>
+
+    <!-- Custom Delete Role Modal -->
+    <UiModal v-model="isDeleteRoleModalOpen" :title="t('roles.deleteRoleModal.title')" size="sm">
+      <div v-if="roleToDelete" class="space-y-4">
+        <div class="flex items-start gap-3.5 p-3.5 bg-red-50 border border-red-200 rounded-2xl">
+          <div class="p-2 bg-red-100 text-red-600 rounded-xl shrink-0 mt-0.5">
+            <Trash2 class="w-5 h-5" />
+          </div>
+          <div class="space-y-1">
+            <h4 class="text-sm font-bold text-red-950">{{ t('roles.deleteRoleModal.confirmTitle') }}</h4>
+            <p class="text-xs text-red-800 leading-relaxed">
+              {{ t('roles.deleteRoleModal.confirmMessage', { name: roleToDelete.name }) }}
+            </p>
+          </div>
+        </div>
+
+        <div class="flex justify-end gap-2 pt-3 border-t border-slate-100">
+          <UiButton variant="outline" size="sm" type="button" @click="isDeleteRoleModalOpen = false">{{ t('roles.deleteRoleModal.cancel') }}</UiButton>
+          <UiButton
+            variant="danger"
+            size="sm"
+            :loading="deleteRoleMutation.isPending.value"
+            @click="deleteRoleMutation.mutate(roleToDelete.id)"
+          >
+            <Trash2 class="w-3.5 h-3.5 mr-1" /> {{ t('roles.deleteRoleModal.deleteButton') }}
+          </UiButton>
+        </div>
+      </div>
+    </UiModal>
+  </div>
+</template>

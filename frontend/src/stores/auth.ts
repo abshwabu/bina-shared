@@ -1,0 +1,286 @@
+import { defineStore } from 'pinia'
+import { ref, computed } from 'vue'
+import { useStorage } from '@vueuse/core'
+import { authApi } from '@/api/auth'
+import { useTenantStore } from '@/stores/tenant'
+
+export interface User {
+  id: number
+  tenant_id?: string
+  name: string
+  email: string
+  roles?: string[]
+  is_super_admin?: boolean
+  avatar?: string
+  plan?: {
+    id: string
+    name: string
+    slug: string
+    allowed_modules: string[]
+    limits?: Record<string, any>
+    perks?: string[]
+  } | null
+  tenant?: {
+    id: string
+    name: string
+    slug: string
+    status: string
+    trial_ends_at?: string | null
+    days_left?: number
+    is_trial?: boolean
+    trial_expired?: boolean
+    needs_plan?: boolean
+    is_pending_activation?: boolean
+    subscription_request?: {
+      plan_id: string
+      plan_name: string
+      plan_slug: string
+      billing_cycle: string
+      amount_cents: number
+      amount_birr: number
+      currency: string
+      payment_method: string
+      payment_reference: string
+      payer_name: string
+      payer_phone: string
+      notes?: string | null
+      requested_at: string
+      status: 'pending' | 'approved' | 'rejected'
+      rejection_reason?: string
+      approved_at?: string
+    } | null
+    enabled_modules?: string[]
+  } | null
+}
+
+export const useAuthStore = defineStore('auth', () => {
+  const user = ref<User | null>(null)
+  const accessToken = useStorage<string | null>('access_token', null)
+  const refreshToken = useStorage<string | null>('refresh_token', null)
+  const permissions = ref<string[]>([])
+
+  const isAuthenticated = computed(() => !!accessToken.value)
+
+  const isSuperAdmin = computed(() => {
+    return (
+      (user.value as any)?.is_super_admin === true ||
+      user.value?.email === 'superadmin@erp.local' ||
+      (Array.isArray(user.value?.roles) && user.value.roles.includes('Super Admin'))
+    )
+  })
+
+  const isTrialActive = computed(() => {
+    return !!user.value?.tenant?.is_trial && !user.value?.tenant?.trial_expired
+  })
+
+  const trialDaysLeft = computed(() => {
+    return user.value?.tenant?.days_left ?? 0
+  })
+
+  const needsPlanSelection = computed(() => {
+    if (user.value?.email === 'superadmin@erp.local') return false
+    return !!user.value?.tenant?.needs_plan
+  })
+
+  const isPendingActivation = computed(() => {
+    return !!user.value?.tenant?.is_pending_activation || user.value?.tenant?.status === 'pending_activation'
+  })
+
+  const subscriptionRequest = computed(() => {
+    return user.value?.tenant?.subscription_request ?? null
+  })
+
+  const userInitials = computed(() => {
+    if (!user.value?.name) return ''
+    return user.value.name
+      .split(' ')
+      .map((n) => n[0])
+      .join('')
+      .toUpperCase()
+  })
+
+  function hasPermission(permission: string) {
+    return permissions.value.includes(permission)
+  }
+
+  function hasModuleAccess(moduleName: string): boolean {
+    if (user.value?.email === 'superadmin@erp.local') {
+      return true
+    }
+
+    if (moduleName.toLowerCase() === 'core') {
+      return true
+    }
+
+    // 1. Check if tenant has specific enabled_modules list
+    if (user.value?.tenant?.enabled_modules && Array.isArray(user.value.tenant.enabled_modules)) {
+      const enabled = user.value.tenant.enabled_modules.map((m) => m.toLowerCase())
+      return enabled.includes(moduleName.toLowerCase())
+    }
+
+    // 2. Fallback to plan allowed_modules
+    if (!user.value?.plan?.allowed_modules) {
+      return true
+    }
+
+    const allowed = user.value.plan.allowed_modules
+    if (allowed.includes('*')) {
+      return true
+    }
+
+    return allowed.map((m) => m.toLowerCase()).includes(moduleName.toLowerCase())
+  }
+
+  function setEnabledModules(modules: string[]) {
+    if (user.value?.tenant) {
+      user.value.tenant.enabled_modules = modules
+    }
+  }
+
+  function setToken(access: string) {
+    accessToken.value = access
+  }
+
+  function setTokens(access: string, refresh?: string) {
+    accessToken.value = access
+    if (refresh) {
+      refreshToken.value = refresh
+    }
+  }
+
+  async function impersonateTenant(access: string, tenant: { id: string; name: string; domain: string }) {
+    const tenantStore = useTenantStore()
+    accessToken.value = access
+    tenantStore.setTenant({
+      id: tenant.id,
+      name: tenant.name,
+      domain: tenant.domain,
+    })
+    await checkAuth()
+  }
+
+  function setUser(userData: User, userPermissions: string[]) {
+    user.value = userData
+    permissions.value = userPermissions
+  }
+
+  async function logout() {
+    try {
+      if (accessToken.value) {
+        await authApi.logout()
+      }
+    } catch (error) {
+      console.error('Logout API call failed', error)
+    } finally {
+      user.value = null
+      accessToken.value = null
+      refreshToken.value = null
+      permissions.value = []
+      try {
+        localStorage.removeItem('pos_cart')
+        localStorage.removeItem('pos_customer')
+        localStorage.removeItem('pos_selected_shop_id')
+        localStorage.removeItem('pos_held_transactions')
+      } catch (e) {
+        console.error('Failed to clear POS localStorage on logout', e)
+      }
+    }
+  }
+
+  async function login(email: string, password: string) {
+    const tenantStore = useTenantStore()
+    const response = await authApi.login({ email, password })
+    setTokens(response.access_token, response.refresh_token)
+
+    if (response.tenant) {
+      tenantStore.setTenant({
+        id: response.tenant.id,
+        name: response.tenant.name,
+        domain: response.tenant.domain,
+      })
+    }
+
+    await checkAuth()
+    return response
+  }
+
+  async function register(data: any) {
+    const tenantStore = useTenantStore()
+    const response = await authApi.register(data)
+    setTokens(response.access_token, response.refresh_token)
+
+    if (response.tenant) {
+      tenantStore.setTenant({
+        id: response.tenant.id,
+        name: response.tenant.name,
+        domain: response.tenant.domain,
+      })
+    }
+
+    await checkAuth()
+    return response
+  }
+
+
+  async function refreshAuthToken() {
+    if (!refreshToken.value) {
+      throw new Error('No refresh token available')
+    }
+
+    try {
+      const response = await authApi.refresh(refreshToken.value)
+      accessToken.value = response.access_token
+    } catch (error) {
+      await logout()
+      throw error
+    }
+  }
+
+  async function checkAuth() {
+    if (!accessToken.value) return
+
+    try {
+      const response = await authApi.me()
+      setUser(response.data, response.data.permissions)
+
+      const tenantStore = useTenantStore()
+      if (response.data.tenant_id && !tenantStore.tenantId) {
+        tenantStore.setTenant({
+          id: response.data.tenant_id,
+          name: 'Active Enterprise Workspace',
+          domain: 'tenant',
+        })
+      }
+    } catch (error) {
+      await logout()
+      throw error
+    }
+  }
+
+  return {
+    user,
+    accessToken,
+    refreshToken,
+    permissions,
+    isAuthenticated,
+    isSuperAdmin,
+    isTrialActive,
+    trialDaysLeft,
+    needsPlanSelection,
+    isPendingActivation,
+    subscriptionRequest,
+    userInitials,
+    hasPermission,
+    hasModuleAccess,
+    setEnabledModules,
+    setToken,
+    setTokens,
+    impersonateTenant,
+    setUser,
+    logout,
+    login,
+    register,
+    refreshAuthToken,
+    checkAuth,
+  }
+})

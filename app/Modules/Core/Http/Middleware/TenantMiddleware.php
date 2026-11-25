@@ -1,0 +1,122 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Modules\Core\Http\Middleware;
+
+use App\Modules\Core\Models\Tenant;
+use App\Modules\Core\Tenancy\Finders\DomainTenantFinder;
+use App\Modules\Core\Tenancy\Finders\HeaderTenantFinder;
+use App\Modules\Core\Tenancy\Finders\SubdomainTenantFinder;
+use Closure;
+use Illuminate\Http\JsonResponse;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\App;
+use Symfony\Component\HttpFoundation\Response;
+
+final class TenantMiddleware
+{
+    public function __construct(
+        private readonly SubdomainTenantFinder $subdomainFinder,
+        private readonly DomainTenantFinder $domainFinder,
+        private readonly HeaderTenantFinder $headerFinder,
+    ) {
+    }
+
+    public function handle(Request $request, Closure $next): Response
+    {
+        if ($this->isAlwaysCentralRoute($request)) {
+            return $next($request);
+        }
+
+        $tenant = $this->resolveTenant($request);
+
+        if ($tenant instanceof Tenant) {
+            tenancy()->initialize($tenant);
+            $this->applyTenantContext($tenant);
+
+            if ($tenant->status === 'pending_activation' && !$this->isBillingOrBypassRoute($request)) {
+                return new JsonResponse([
+                    'message' => 'Your subscription payment confirmation is currently awaiting verification and activation by the Super Admin.',
+                    'pending_activation' => true,
+                    'code' => 'SUBSCRIPTION_PENDING_ACTIVATION',
+                ], 402);
+            }
+
+            if ($tenant->needsPlanSelection() && !$this->isBillingOrBypassRoute($request)) {
+                return new JsonResponse([
+                    'message' => 'Your 2-month free trial has ended. Please choose a subscription plan to continue using your workspace.',
+                    'trial_expired' => true,
+                    'code' => 'PLAN_SELECTION_REQUIRED',
+                ], 402);
+            }
+
+            try {
+                return $next($request);
+            } finally {
+                tenancy()->end();
+            }
+        }
+
+        if ($this->isCentralRoute($request)) {
+            return $next($request);
+        }
+
+        return new JsonResponse([
+            'message' => 'Tenant not found.',
+        ], 404);
+    }
+
+    private function resolveTenant(Request $request): ?Tenant
+    {
+        return $this->headerFinder->find($request)
+            ?? $this->subdomainFinder->find($request)
+            ?? $this->domainFinder->find($request);
+    }
+
+    private function isAlwaysCentralRoute(Request $request): bool
+    {
+        return $request->is('api/auth/register')
+            || $request->is('api/super-admin*')
+            || $request->is('api/health');
+    }
+
+    private function isCentralRoute(Request $request): bool
+    {
+        $centralRoutes = [
+            'api/health',
+        ];
+
+        return in_array($request->path(), $centralRoutes, true)
+            || str_starts_with($request->path(), 'api/auth')
+            || str_starts_with($request->path(), 'api/super-admin')
+            || str_starts_with($request->path(), 'api/store')
+            || str_starts_with($request->path(), 'storage')
+            || str_starts_with($request->path(), 'api/media');
+    }
+
+    private function isBillingOrBypassRoute(Request $request): bool
+    {
+        return $this->isCentralRoute($request)
+            || str_starts_with($request->path(), 'api/billing')
+            || $request->path() === 'api/auth/me'
+            || $request->path() === 'api/auth/logout';
+    }
+
+    private function applyTenantContext(Tenant $tenant): void
+    {
+        $settings = $tenant->settings ?? [];
+
+        $timezone = $settings['timezone'] ?? config('app.timezone');
+        $locale = $settings['locale'] ?? config('app.locale');
+        $currency = $settings['currency'] ?? config('app.currency', 'USD');
+
+        config([
+            'app.timezone' => $timezone,
+            'app.currency' => $currency,
+        ]);
+
+        date_default_timezone_set($timezone);
+        App::setLocale($locale);
+    }
+}

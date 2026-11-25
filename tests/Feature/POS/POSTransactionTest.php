@@ -1,0 +1,692 @@
+<?php
+
+declare(strict_types=1);
+
+use App\Modules\Core\Models\Tenant;
+use App\Modules\Core\Models\User;
+use App\Modules\Inventory\Models\Product;
+use App\Modules\Inventory\Models\StockLevel;
+use App\Modules\Inventory\Models\StockLocation;
+use App\Modules\Inventory\Models\Warehouse;
+use App\Modules\POS\Models\POSTerminal;
+use App\Modules\Sales\Models\Customer;
+use Database\Seeders\TenantRoleSeeder;
+use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Http;
+
+it('completes POS checkout flow and verifies stock reduction and receipt', function (): void {
+    $tenant = Tenant::create([
+        'name'   => 'POS Test Tenant',
+        'slug'   => 'postest',
+        'status' => 'active',
+    ]);
+
+    $data = $tenant->run(function () use ($tenant) {
+        (new TenantRoleSeeder())->run();
+
+        $cashier = User::create([
+            'tenant_id' => $tenant->getKey(),
+            'name'      => 'Cashier User',
+            'email'     => 'cashier@pos.test',
+            'password'  => Hash::make('password123'),
+            'is_active' => true,
+        ]);
+        $cashier->assignRole('Cashier');
+
+        $warehouse = Warehouse::create([
+            'name'      => 'POS Warehouse',
+            'code'      => 'POS-WH',
+            'type'      => 'own',
+            'is_active' => true,
+        ]);
+
+        $location = StockLocation::create([
+            'warehouse_id' => $warehouse->id,
+            'name'         => 'Storefront',
+            'code'         => 'STORE-1',
+            'type'         => 'storage',
+            'is_active'    => true,
+        ]);
+
+        $terminal = POSTerminal::create([
+            'name'        => 'Main Register',
+            'location_id' => $location->id,
+            'is_active'   => true,
+        ]);
+
+        $product = Product::create([
+            'sku'           => 'COFFEE-01',
+            'name'          => 'Espresso Roast',
+            'type'          => 'stockable',
+            'status'        => 'active',
+            'cost_price'    => 500,
+            'selling_price' => 1200,
+        ]);
+
+        StockLevel::create([
+            'product_id'         => $product->id,
+            'location_id'        => $location->id,
+            'quantity_on_hand'   => 50,
+            'quantity_committed' => 0,
+            'quantity_on_order'  => 0,
+        ]);
+
+        return [
+            'cashier'  => $cashier,
+            'terminal' => $terminal,
+            'product'  => $product,
+            'location' => $location,
+        ];
+    });
+
+    $loginResponse = $this->postJson('http://postest.localhost/api/auth/login', [
+        'email'    => 'cashier@pos.test',
+        'password' => 'password123',
+    ]);
+    $token = $loginResponse->json('access_token');
+    $headers = ['Authorization' => "Bearer {$token}"];
+
+    // 1. Open session
+    $openResponse = $this->withHeaders($headers)->postJson('http://postest.localhost/api/pos/sessions/open', [
+        'terminal_id'        => $data['terminal']->id,
+        'opening_cash_cents' => 10000, // $100.00
+    ]);
+
+    $openResponse->assertStatus(201);
+    $sessionId = $openResponse->json('data.id');
+    expect($sessionId)->not->toBeNull();
+
+    // 2. Checkout
+    $checkoutResponse = $this->withHeaders($headers)->postJson('http://postest.localhost/api/pos/checkout', [
+        'session_id'  => $sessionId,
+        'location_id' => $data['location']->id,
+        'items'       => [
+            [
+                'product_id'       => $data['product']->id,
+                'quantity'         => 2,
+                'unit_price_cents' => 1200,
+            ],
+        ],
+        'payments'    => [
+            [
+                'method'       => 'cash',
+                'amount_cents' => 3000,
+                'change_cents' => 480,
+            ],
+        ],
+    ]);
+
+    $checkoutResponse->assertStatus(201);
+    $receiptNumber = $checkoutResponse->json('data.receipt_number');
+    $subtotalCents = $checkoutResponse->json('data.subtotal_cents');
+    $totalCents = $checkoutResponse->json('data.total_cents');
+
+    expect($subtotalCents)->toBe(2400); // 2 * $12.00
+    expect($totalCents)->toBe(2520);    // $24.00 + 5% tax ($1.20) = $25.20
+    expect($receiptNumber)->toStartWith('REC-');
+
+    // 3. Verify stock reduced to 48
+    $tenant->run(function () use ($data) {
+        $level = StockLevel::where('product_id', $data['product']->id)
+            ->where('location_id', $data['location']->id)
+            ->first();
+
+        expect((int) $level->quantity_on_hand)->toBe(48);
+    });
+
+    // 4. Receipt lookup
+    $receiptResponse = $this->withHeaders($headers)->getJson("http://postest.localhost/api/pos/receipts/{$receiptNumber}");
+    $receiptResponse->assertStatus(200);
+    $receiptResponse->assertJsonPath('data.receipt_number', $receiptNumber);
+    $receiptResponse->assertJsonCount(1, 'data.items');
+    $receiptResponse->assertJsonCount(1, 'data.payments');
+
+    // 5. Close session
+    $closeResponse = $this->withHeaders($headers)->postJson("http://postest.localhost/api/pos/sessions/{$sessionId}/close", [
+        'closing_cash_cents' => 12520, // $100 opening + $25.20 cash sales
+    ]);
+    $closeResponse->assertStatus(200);
+    $closeResponse->assertJsonPath('data.status', 'closed');
+    $closeResponse->assertJsonPath('data.cash_variance_cents', 12520 - 10000);
+});
+
+it('rejects checkout with insufficient stock', function (): void {
+    $tenant = Tenant::create([
+        'name'   => 'POS Stock Test Tenant',
+        'slug'   => 'posstock',
+        'status' => 'active',
+    ]);
+
+    $data = $tenant->run(function () use ($tenant) {
+        (new TenantRoleSeeder())->run();
+
+        $cashier = User::create([
+            'tenant_id' => $tenant->getKey(),
+            'name'      => 'Cashier User',
+            'email'     => 'cashier@posstock.test',
+            'password'  => Hash::make('password123'),
+            'is_active' => true,
+        ]);
+        $cashier->assignRole('Cashier');
+
+        $warehouse = Warehouse::create([
+            'name'      => 'Warehouse',
+            'code'      => 'WH-LOW',
+            'type'      => 'own',
+            'is_active' => true,
+        ]);
+
+        $location = StockLocation::create([
+            'warehouse_id' => $warehouse->id,
+            'name'         => 'Storefront',
+            'code'         => 'STORE-LOW',
+            'type'         => 'storage',
+            'is_active'    => true,
+        ]);
+
+        $terminal = POSTerminal::create([
+            'name'        => 'Register 1',
+            'location_id' => $location->id,
+            'is_active'   => true,
+        ]);
+
+        $product = Product::create([
+            'sku'           => 'LIMITED-01',
+            'name'          => 'Limited Item',
+            'type'          => 'stockable',
+            'status'        => 'active',
+            'cost_price'    => 100,
+            'selling_price' => 500,
+        ]);
+
+        StockLevel::create([
+            'product_id'         => $product->id,
+            'location_id'        => $location->id,
+            'quantity_on_hand'   => 1,
+            'quantity_committed' => 0,
+            'quantity_on_order'  => 0,
+        ]);
+
+        return [
+            'cashier'  => $cashier,
+            'terminal' => $terminal,
+            'product'  => $product,
+            'location' => $location,
+        ];
+    });
+
+    $loginResponse = $this->postJson('http://posstock.localhost/api/auth/login', [
+        'email'    => 'cashier@posstock.test',
+        'password' => 'password123',
+    ]);
+    $token = $loginResponse->json('access_token');
+    $headers = ['Authorization' => "Bearer {$token}"];
+
+    $openResponse = $this->withHeaders($headers)->postJson('http://posstock.localhost/api/pos/sessions/open', [
+        'terminal_id' => $data['terminal']->id,
+    ]);
+    $sessionId = $openResponse->json('data.id');
+
+    // Attempt to buy 10 items when only 1 is available
+    $checkoutResponse = $this->withHeaders($headers)->postJson('http://posstock.localhost/api/pos/checkout', [
+        'session_id'  => $sessionId,
+        'location_id' => $data['location']->id,
+        'items'       => [
+            [
+                'product_id'       => $data['product']->id,
+                'quantity'         => 10,
+                'unit_price_cents' => 500,
+            ],
+        ],
+        'payments'    => [
+            [
+                'method'       => 'cash',
+                'amount_cents' => 6000,
+            ],
+        ],
+    ]);
+
+    $checkoutResponse->assertStatus(422);
+    $checkoutResponse->assertJsonFragment([
+        'pointer' => '/data/attributes/items',
+    ]);
+});
+
+it('handles customer TIN lookup and optional customer tin/name on POS checkout', function (): void {
+    $tenant = Tenant::create([
+        'name'   => 'POS Customer Test Tenant',
+        'slug'   => 'poscust',
+        'status' => 'active',
+    ]);
+
+    $data = $tenant->run(function () use ($tenant) {
+        (new TenantRoleSeeder())->run();
+
+        $cashier = User::create([
+            'tenant_id' => $tenant->getKey(),
+            'name'      => 'Cashier Cust',
+            'email'     => 'cashier@poscust.test',
+            'password'  => Hash::make('password123'),
+            'is_active' => true,
+        ]);
+        $cashier->assignRole('Cashier');
+
+        $warehouse = Warehouse::create([
+            'name'      => 'Warehouse Cust',
+            'code'      => 'WH-CUST',
+            'type'      => 'own',
+            'is_active' => true,
+        ]);
+
+        $location = StockLocation::create([
+            'warehouse_id' => $warehouse->id,
+            'name'         => 'Storefront Cust',
+            'code'         => 'STORE-CUST',
+            'type'         => 'storage',
+            'is_active'    => true,
+        ]);
+
+        $terminal = POSTerminal::create([
+            'name'        => 'Register Cust',
+            'location_id' => $location->id,
+            'is_active'   => true,
+        ]);
+
+        $product = Product::create([
+            'sku'           => 'ITEM-CUST-1',
+            'name'          => 'Product 1',
+            'type'          => 'stockable',
+            'status'        => 'active',
+            'cost_price'    => 100,
+            'selling_price' => 1000,
+        ]);
+
+        StockLevel::create([
+            'product_id'         => $product->id,
+            'location_id'        => $location->id,
+            'quantity_on_hand'   => 100,
+            'quantity_committed' => 0,
+            'quantity_on_order'  => 0,
+        ]);
+
+        // Existing customer with a registered TIN
+        $existingCustomer = Customer::create([
+            'name'  => 'Abebe Kebede Trading',
+            'tin'   => '0012345678',
+            'phone' => '+251911223344',
+            'email' => 'abebe@example.com',
+        ]);
+
+        return [
+            'cashier'  => $cashier,
+            'terminal' => $terminal,
+            'product'  => $product,
+            'location' => $location,
+            'customer' => $existingCustomer,
+        ];
+    });
+
+    $loginResponse = $this->postJson('http://poscust.localhost/api/auth/login', [
+        'email'    => 'cashier@poscust.test',
+        'password' => 'password123',
+    ]);
+    $token = $loginResponse->json('access_token');
+    $headers = ['Authorization' => "Bearer {$token}"];
+
+    // 1. Open session
+    $openResponse = $this->withHeaders($headers)->postJson('http://poscust.localhost/api/pos/sessions/open', [
+        'terminal_id' => $data['terminal']->id,
+    ]);
+    $sessionId = $openResponse->json('data.id');
+
+    // 2. Lookup existing TIN in local database
+    $lookupLocal = $this->withHeaders($headers)->getJson('http://poscust.localhost/api/pos/customers/lookup-tin?tin=0012345678');
+    $lookupLocal->assertStatus(200);
+    $lookupLocal->assertJsonPath('data.found', true);
+    $lookupLocal->assertJsonPath('data.name', 'Abebe Kebede Trading');
+    $lookupLocal->assertJsonPath('data.tin', '0012345678');
+
+    // 3. Lookup unknown TIN with no external API configured -> returns found=false with helpful message (manual entry allowed)
+    $lookupUnknown = $this->withHeaders($headers)->getJson('http://poscust.localhost/api/pos/customers/lookup-tin?tin=9999999999');
+    $lookupUnknown->assertStatus(200);
+    $lookupUnknown->assertJsonPath('data.found', false);
+
+    // 4. Lookup with external eTrade API mocked
+    Http::fake([
+        'https://api.etrade.gov.et/v1/taxpayer*' => Http::response([
+            'trade_name' => 'Chala Megersa Import & Export',
+            'tin'        => '0098765432',
+            'status'     => 'active',
+        ], 200),
+    ]);
+    config(['services.etrade.url' => 'https://api.etrade.gov.et/v1/taxpayer']);
+
+    $lookupETrade = $this->withHeaders($headers)->getJson('http://poscust.localhost/api/pos/customers/lookup-tin?tin=0098765432');
+    $lookupETrade->assertStatus(200);
+    $lookupETrade->assertJsonPath('data.found', true);
+    $lookupETrade->assertJsonPath('data.name', 'Chala Megersa Import & Export');
+    $lookupETrade->assertJsonPath('data.source', 'etrade_api');
+
+    // 5. Checkout with customer TIN and Name (both provided, but neither is required)
+    $checkoutResponse = $this->withHeaders($headers)->postJson('http://poscust.localhost/api/pos/checkout', [
+        'session_id'    => $sessionId,
+        'location_id'   => $data['location']->id,
+        'customer_tin'  => '0098765432',
+        'customer_name' => 'Chala Megersa Import & Export',
+        'items'         => [
+            [
+                'product_id'       => $data['product']->id,
+                'quantity'         => 1,
+                'unit_price_cents' => 1000,
+            ],
+        ],
+        'payments'      => [
+            [
+                'method'       => 'cash',
+                'amount_cents' => 1050,
+            ],
+        ],
+    ]);
+
+    $checkoutResponse->assertStatus(201);
+    $checkoutResponse->assertJsonPath('data.customer_tin', '0098765432');
+    $checkoutResponse->assertJsonPath('data.customer_name', 'Chala Megersa Import & Export');
+    $receiptNumber = $checkoutResponse->json('data.receipt_number');
+
+    // Verify receipt contains customer TIN and customer name
+    $receiptResponse = $this->withHeaders($headers)->getJson("http://poscust.localhost/api/pos/receipts/{$receiptNumber}");
+    $receiptResponse->assertStatus(200);
+    $receiptResponse->assertJsonPath('data.customer_tin', '0098765432');
+    $receiptResponse->assertJsonPath('data.customer_name', 'Chala Megersa Import & Export');
+
+    // 6. Checkout WITHOUT customer TIN or customer Name (walk-in: both optional / not required)
+    $walkInResponse = $this->withHeaders($headers)->postJson('http://poscust.localhost/api/pos/checkout', [
+        'session_id'    => $sessionId,
+        'location_id'   => $data['location']->id,
+        'items'         => [
+            [
+                'product_id'       => $data['product']->id,
+                'quantity'         => 1,
+                'unit_price_cents' => 1000,
+            ],
+        ],
+        'payments'      => [
+            [
+                'method'       => 'cash',
+                'amount_cents' => 1050,
+            ],
+        ],
+    ]);
+
+    $walkInResponse->assertStatus(201);
+    $walkInResponse->assertJsonPath('data.customer_tin', null);
+    $walkInResponse->assertJsonPath('data.customer_name', null);
+});
+
+it('supports bank and wallet payment methods with provider and reference', function (): void {
+    $tenant = Tenant::create([
+        'name'   => 'POS Bank Wallet Test Tenant',
+        'slug'   => 'posbw',
+        'status' => 'active',
+    ]);
+
+    $data = $tenant->run(function () use ($tenant) {
+        (new TenantRoleSeeder())->run();
+
+        $cashier = User::create([
+            'tenant_id' => $tenant->getKey(),
+            'name'      => 'Cashier BW',
+            'email'     => 'cashier@posbw.test',
+            'password'  => Hash::make('password123'),
+            'is_active' => true,
+        ]);
+        $cashier->assignRole('Cashier');
+
+        $warehouse = Warehouse::create([
+            'name'      => 'Warehouse BW',
+            'code'      => 'WH-BW',
+            'type'      => 'own',
+            'is_active' => true,
+        ]);
+
+        $location = StockLocation::create([
+            'warehouse_id' => $warehouse->id,
+            'name'         => 'Storefront BW',
+            'code'         => 'STORE-BW',
+            'type'         => 'storage',
+            'is_active'    => true,
+        ]);
+
+        $terminal = POSTerminal::create([
+            'name'        => 'Register BW',
+            'location_id' => $location->id,
+            'is_active'   => true,
+        ]);
+
+        $product = Product::create([
+            'sku'           => 'ITEM-BW-1',
+            'name'          => 'Keyboard',
+            'type'          => 'stockable',
+            'status'        => 'active',
+            'cost_price'    => 200,
+            'selling_price' => 2000,
+        ]);
+
+        StockLevel::create([
+            'product_id'         => $product->id,
+            'location_id'        => $location->id,
+            'quantity_on_hand'   => 50,
+            'quantity_committed' => 0,
+            'quantity_on_order'  => 0,
+        ]);
+
+        return [
+            'terminal' => $terminal,
+            'product'  => $product,
+            'location' => $location,
+        ];
+    });
+
+    $loginResponse = $this->postJson('http://posbw.localhost/api/auth/login', [
+        'email'    => 'cashier@posbw.test',
+        'password' => 'password123',
+    ]);
+    $token = $loginResponse->json('access_token');
+    $headers = ['Authorization' => "Bearer {$token}"];
+
+    $openResponse = $this->withHeaders($headers)->postJson('http://posbw.localhost/api/pos/sessions/open', [
+        'terminal_id' => $data['terminal']->id,
+    ]);
+    $sessionId = $openResponse->json('data.id');
+
+    // 1. Checkout with Bank (Commercial Bank of Ethiopia)
+    $bankCheckout = $this->withHeaders($headers)->postJson('http://posbw.localhost/api/pos/checkout', [
+        'session_id'  => $sessionId,
+        'location_id' => $data['location']->id,
+        'items'       => [
+            [
+                'product_id'       => $data['product']->id,
+                'quantity'         => 1,
+                'unit_price_cents' => 2000,
+            ],
+        ],
+        'payments'    => [
+            [
+                'method'       => 'bank',
+                'amount_cents' => 2100, // $20.00 + 5% tax = $21.00
+                'reference'    => 'Commercial Bank of Ethiopia - FT260901',
+            ],
+        ],
+    ]);
+
+    $bankCheckout->assertStatus(201);
+    $bankReceipt = $bankCheckout->json('data.receipt_number');
+    $bankCheckout->assertJsonPath('data.payments.0.method', 'bank');
+    $bankCheckout->assertJsonPath('data.payments.0.reference', 'Commercial Bank of Ethiopia - FT260901');
+
+    // 2. Checkout with Wallet (Telebirr)
+    $walletCheckout = $this->withHeaders($headers)->postJson('http://posbw.localhost/api/pos/checkout', [
+        'session_id'  => $sessionId,
+        'location_id' => $data['location']->id,
+        'items'       => [
+            [
+                'product_id'       => $data['product']->id,
+                'quantity'         => 1,
+                'unit_price_cents' => 2000,
+            ],
+        ],
+        'payments'    => [
+            [
+                'method'       => 'wallet',
+                'amount_cents' => 2100,
+                'reference'    => 'Telebirr - TXN12345678',
+            ],
+        ],
+    ]);
+
+    $walletCheckout->assertStatus(201);
+    $walletReceipt = $walletCheckout->json('data.receipt_number');
+    $walletCheckout->assertJsonPath('data.payments.0.method', 'wallet');
+    $walletCheckout->assertJsonPath('data.payments.0.reference', 'Telebirr - TXN12345678');
+
+    // 3. Verify Receipts
+    $getReceipt = $this->withHeaders($headers)->getJson("http://posbw.localhost/api/pos/receipts/{$bankReceipt}");
+    $getReceipt->assertStatus(200);
+    $getReceipt->assertJsonPath('data.payments.0.method', 'bank');
+    $getReceipt->assertJsonPath('data.payments.0.reference', 'Commercial Bank of Ethiopia - FT260901');
+});
+
+it('allows cashier to switch shops and open sessions per shop without falling back to previous shop', function (): void {
+    $tenant = Tenant::create([
+        'name'   => 'POS Multi-Shop Tenant',
+        'slug'   => 'posswitch',
+        'status' => 'active',
+    ]);
+
+    $data = $tenant->run(function () use ($tenant) {
+        (new TenantRoleSeeder())->run();
+
+        $admin = User::create([
+            'tenant_id' => $tenant->getKey(),
+            'name'      => 'Shop Switch Admin',
+            'email'     => 'admin@switch.test',
+            'password'  => Hash::make('password123'),
+            'is_active' => true,
+        ]);
+        $admin->assignRole('Admin');
+
+        $warehouse = Warehouse::create([
+            'name'      => 'Multi WH',
+            'code'      => 'MWH-01',
+            'type'      => 'own',
+            'is_active' => true,
+        ]);
+
+        $locA = StockLocation::create([
+            'warehouse_id' => $warehouse->id,
+            'name'         => 'Store A Loc',
+            'code'         => 'LOC-A',
+            'type'         => 'storage',
+            'is_active'    => true,
+        ]);
+
+        $locB = StockLocation::create([
+            'warehouse_id' => $warehouse->id,
+            'name'         => 'Store B Loc',
+            'code'         => 'LOC-B',
+            'type'         => 'storage',
+            'is_active'    => true,
+        ]);
+
+        $shopA = \App\Modules\Shops\Models\Shop::create([
+            'name'              => 'Shop Alpha',
+            'code'              => 'SHOP-A',
+            'stock_mode'        => 'own',
+            'warehouse_id'      => $warehouse->id,
+            'stock_location_id' => $locA->id,
+            'is_active'         => true,
+        ]);
+
+        $shopB = \App\Modules\Shops\Models\Shop::create([
+            'name'              => 'Shop Beta',
+            'code'              => 'SHOP-B',
+            'stock_mode'        => 'own',
+            'warehouse_id'      => $warehouse->id,
+            'stock_location_id' => $locB->id,
+            'is_active'         => true,
+        ]);
+
+        $termA = POSTerminal::create([
+            'name'        => 'Alpha Register',
+            'location_id' => $locA->id,
+            'shop_id'     => $shopA->id,
+            'is_active'   => true,
+        ]);
+
+        $termB = POSTerminal::create([
+            'name'        => 'Beta Register',
+            'location_id' => $locB->id,
+            'shop_id'     => $shopB->id,
+            'is_active'   => true,
+        ]);
+
+        return [
+            'admin' => $admin,
+            'shopA' => $shopA,
+            'shopB' => $shopB,
+            'termA' => $termA,
+            'termB' => $termB,
+        ];
+    });
+
+    $loginResponse = $this->postJson('http://posswitch.localhost/api/auth/login', [
+        'email'    => 'admin@switch.test',
+        'password' => 'password123',
+    ]);
+    $token = $loginResponse->json('access_token');
+    $headers = ['Authorization' => "Bearer {$token}"];
+
+    // 1. Open session in Shop A
+    $openA = $this->withHeaders($headers)->postJson('http://posswitch.localhost/api/pos/sessions/open', [
+        'terminal_id'        => $data['termA']->id,
+        'shop_id'            => $data['shopA']->id,
+        'opening_cash_cents' => 5000,
+    ]);
+    $openA->assertStatus(201);
+    $sessionAId = $openA->json('data.id');
+    expect($openA->json('data.shop_id'))->toBe($data['shopA']->id);
+
+    // 2. Query current session for Shop A -> returns Session A
+    $currA = $this->withHeaders($headers)->getJson("http://posswitch.localhost/api/pos/sessions/current?shop_id={$data['shopA']->id}");
+    $currA->assertStatus(200);
+    expect($currA->json('data.id'))->toBe($sessionAId);
+    expect($currA->json('data.shop_id'))->toBe($data['shopA']->id);
+
+    // 3. Query current session for Shop B (which has no session yet) -> MUST return null, NOT Session A!
+    $currB = $this->withHeaders($headers)->getJson("http://posswitch.localhost/api/pos/sessions/current?shop_id={$data['shopB']->id}");
+    $currB->assertStatus(200);
+    expect($currB->json('data'))->toBeNull();
+
+    // 4. Open session in Shop B
+    $openB = $this->withHeaders($headers)->postJson('http://posswitch.localhost/api/pos/sessions/open', [
+        'terminal_id'        => $data['termB']->id,
+        'shop_id'            => $data['shopB']->id,
+        'opening_cash_cents' => 10000,
+    ]);
+    $openB->assertStatus(201);
+    $sessionBId = $openB->json('data.id');
+    expect($sessionBId)->not->toBe($sessionAId);
+    expect($openB->json('data.shop_id'))->toBe($data['shopB']->id);
+
+    // 5. Switching back: Query Shop A returns Session A, Query Shop B returns Session B
+    $checkA = $this->withHeaders($headers)->getJson("http://posswitch.localhost/api/pos/sessions/current?shop_id={$data['shopA']->id}");
+    $checkA->assertStatus(200);
+    expect($checkA->json('data.id'))->toBe($sessionAId);
+    expect($checkA->json('data.shop_id'))->toBe($data['shopA']->id);
+
+    $checkB = $this->withHeaders($headers)->getJson("http://posswitch.localhost/api/pos/sessions/current?shop_id={$data['shopB']->id}");
+    $checkB->assertStatus(200);
+    expect($checkB->json('data.id'))->toBe($sessionBId);
+    expect($checkB->json('data.shop_id'))->toBe($data['shopB']->id);
+});
+

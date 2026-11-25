@@ -1,0 +1,36 @@
+<?php
+
+declare(strict_types=1);
+
+namespace App\Modules\HR\Models;
+
+use Illuminate\Database\Eloquent\Factories\HasFactory;
+use Illuminate\Database\Eloquent\Model;
+
+class EmployeeSchedule extends Model
+{
+    use HasFactory;
+
+    protected $table = 'hr_employee_schedules';
+
+    public $timestamps = false;
+    public $incrementing = false;
+    protected $primaryKey = null;
+
+    protected $fillable = [
+        'employee_id',
+        'schedule_id',
+        'effective_from',
+        'effective_to',
+    ];
+
+    public function employee()
+    {
+        return $this->belongsTo(Employee::class, 'employee_id');
+    }
+
+    public function schedule()
+    {
+        return $this->belongsTo(WorkSchedule::class, 'schedule_id');
+    }
+}

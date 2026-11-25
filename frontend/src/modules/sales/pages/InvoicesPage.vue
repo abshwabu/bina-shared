@@ -1,0 +1,1141 @@
+<script setup lang="ts">
+import { computed, ref } from 'vue'
+import { useI18n } from 'vue-i18n'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/vue-query'
+import { salesApi, type Invoice, type InvoiceStatus, type Customer } from '@/api/sales'
+import { inventoryApi } from '@/api/inventory'
+import UiBadge from '@/components/ui/UiBadge.vue'
+import UiButton from '@/components/ui/UiButton.vue'
+import UiInput from '@/components/ui/UiInput.vue'
+import UiModal from '@/components/ui/UiModal.vue'
+import UiSelect from '@/components/ui/UiSelect.vue'
+import UiTable from '@/components/ui/UiTable.vue'
+import { formatCurrency, formatDate } from '@/utils/format'
+import {
+  Plus,
+  Search,
+  FileText,
+  Users,
+  Trash2,
+  Edit2,
+  Package,
+  Percent,
+  Check,
+  ChevronDown,
+  Sparkles,
+  Receipt,
+  Mail,
+  Phone,
+  Eye,
+  DollarSign,
+  AlertCircle,
+  TrendingUp,
+  CreditCard,
+  Clock,
+  CheckCircle2,
+} from '@lucide/vue'
+
+const { t } = useI18n()
+const queryClient = useQueryClient()
+const activeTab = ref<'invoices' | 'customers'>('invoices')
+const searchQuery = ref('')
+const isInvoiceModalOpen = ref(false)
+const isCustomerModalOpen = ref(false)
+const isEditCustomerModalOpen = ref(false)
+const isPaymentModalOpen = ref(false)
+
+const selectedInvoice = ref<Invoice | null>(null)
+const editingCustomerId = ref<string | null>(null)
+const errorMessage = ref('')
+
+const today = new Date().toISOString().slice(0, 10)
+const dueDefault = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10)
+
+interface InvoiceLineItem {
+  product_id?: string
+  sku?: string
+  description: string
+  quantity: number
+  unit_price: number
+  search_query?: string
+  is_dropdown_open?: boolean
+}
+
+const invoiceForm = ref({
+  customer_id: '',
+  status: 'sent' as 'draft' | 'sent',
+  issue_date: today,
+  due_date: dueDefault,
+  tax_percent: 0,
+  notes: '',
+  lines: [
+    {
+      product_id: '',
+      sku: '',
+      description: '',
+      quantity: 1,
+      unit_price: 0,
+      search_query: '',
+      is_dropdown_open: false,
+    },
+  ] as InvoiceLineItem[],
+})
+
+const customerForm = ref({
+  name: '',
+  email: '',
+  phone: '',
+})
+
+const paymentForm = ref({
+  amount_dollars: 0,
+  method: 'cash',
+  reference: '',
+})
+
+// Queries
+const { data: invoices, isLoading: invoicesLoading } = useQuery({
+  queryKey: ['sales', 'invoices'],
+  queryFn: () => salesApi.getInvoices().then((res) => res.data.data),
+})
+
+const { data: customers, isLoading: customersLoading } = useQuery({
+  queryKey: ['sales', 'customers'],
+  queryFn: () => salesApi.getCustomers().then((res) => res.data.data),
+})
+
+const { data: productsData, isLoading: productsLoading } = useQuery({
+  queryKey: ['inventory', 'products-lookup'],
+  queryFn: () => inventoryApi.getProducts({ status: 'active' }, 1).then((res) => res.data.data),
+})
+
+const allProducts = computed(() => productsData.value || [])
+
+// High-Level Financial Summary Stats across Invoices
+const financialSummary = computed(() => {
+  const list = invoices.value || []
+  let totalInvoicedCents = 0
+  let totalCollectedCents = 0
+  let totalOutstandingCents = 0
+  let overdueCents = 0
+  let overdueCount = 0
+
+  const todayStr = new Date().toISOString().slice(0, 10)
+
+  for (const inv of list) {
+    if (inv.status === 'void') continue
+
+    const total = Number(inv.total_cents || 0)
+    const paid = Number(inv.amount_paid_cents || 0)
+    const due = Math.max(0, total - paid)
+
+    if (inv.status === 'sent' || inv.status === 'paid') {
+      totalInvoicedCents += total
+      totalCollectedCents += paid
+      totalOutstandingCents += due
+
+      if (due > 0 && inv.due_date && inv.due_date < todayStr) {
+        overdueCents += due
+        overdueCount++
+      }
+    }
+  }
+
+  return {
+    totalInvoicedCents,
+    totalCollectedCents,
+    totalOutstandingCents,
+    overdueCents,
+    overdueCount,
+  }
+})
+
+// Filter products based on search term in line item
+function getFilteredProducts(query: string) {
+  const q = (query || '').toLowerCase().trim()
+  if (!q) return allProducts.value.slice(0, 8)
+  return allProducts.value
+    .filter(
+      (p) =>
+        p.name.toLowerCase().includes(q) ||
+        (p.sku && p.sku.toLowerCase().includes(q)) ||
+        (p.category?.name && p.category.name.toLowerCase().includes(q))
+    )
+    .slice(0, 8)
+}
+
+function selectProductForLine(line: InvoiceLineItem, product: any) {
+  line.product_id = product.id
+  line.sku = product.sku
+  line.description = product.name
+  line.search_query = product.name
+  line.unit_price = Number(((product.selling_price || 0) / 100).toFixed(2))
+  line.is_dropdown_open = false
+}
+
+// Mutations
+const createCustomerMutation = useMutation({
+  mutationFn: () =>
+    salesApi.createCustomer({
+      name: customerForm.value.name,
+      email: customerForm.value.email || null,
+      phone: customerForm.value.phone || null,
+    }),
+  onSuccess: (res) => {
+    queryClient.invalidateQueries({ queryKey: ['sales', 'customers'] })
+    invoiceForm.value.customer_id = res.data.data.id
+    isCustomerModalOpen.value = false
+    customerForm.value = { name: '', email: '', phone: '' }
+    errorMessage.value = ''
+  },
+  onError: (err: any) => {
+    errorMessage.value = err?.response?.data?.message || err?.message || t('sales.messages.createCustomerError')
+  },
+})
+
+const updateCustomerMutation = useMutation({
+  mutationFn: ({ id, data }: { id: string; data: any }) =>
+    salesApi.updateCustomer(id, data),
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['sales', 'customers'] })
+    queryClient.invalidateQueries({ queryKey: ['sales', 'invoices'] })
+    isEditCustomerModalOpen.value = false
+    editingCustomerId.value = null
+    customerForm.value = { name: '', email: '', phone: '' }
+    errorMessage.value = ''
+  },
+  onError: (err: any) => {
+    errorMessage.value = err?.response?.data?.message || err?.message || t('sales.messages.updateCustomerError')
+  },
+})
+
+const deleteCustomerMutation = useMutation({
+  mutationFn: (id: string) => salesApi.deleteCustomer(id),
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['sales', 'customers'] })
+    errorMessage.value = ''
+  },
+  onError: (err: any) => {
+    errorMessage.value = err?.response?.data?.message || err?.message || t('sales.messages.deleteCustomerError')
+  },
+})
+
+const createInvoiceMutation = useMutation({
+  mutationFn: () => {
+    const taxCents = Math.round(invoiceTaxDollars.value * 100)
+    return salesApi.createInvoice({
+      customer_id: invoiceForm.value.customer_id,
+      status: invoiceForm.value.status,
+      issue_date: invoiceForm.value.issue_date,
+      due_date: invoiceForm.value.due_date,
+      tax_cents: taxCents,
+      notes: invoiceForm.value.notes || null,
+      lines: invoiceForm.value.lines.map((line) => ({
+        description: line.description || line.search_query || 'Item',
+        quantity: Number(line.quantity),
+        unit_price_cents: Math.round(Number(line.unit_price || 0) * 100),
+      })),
+    })
+  },
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['sales', 'invoices'] })
+    queryClient.invalidateQueries({ queryKey: ['sales', 'customers'] })
+    queryClient.invalidateQueries({ queryKey: ['accounting'] })
+    isInvoiceModalOpen.value = false
+    resetInvoiceForm()
+    errorMessage.value = ''
+  },
+  onError: (err: any) => {
+    errorMessage.value = err?.response?.data?.message || err?.message || t('sales.messages.createInvoiceError')
+  },
+})
+
+const markSentMutation = useMutation({
+  mutationFn: (id: string) => salesApi.markSent(id),
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['sales', 'invoices'] })
+    queryClient.invalidateQueries({ queryKey: ['sales', 'customers'] })
+    queryClient.invalidateQueries({ queryKey: ['accounting'] })
+  },
+  onError: (err: any) => {
+    errorMessage.value = err?.response?.data?.message || err?.message || t('sales.messages.markSentError')
+  },
+})
+
+const recordPaymentMutation = useMutation({
+  mutationFn: ({ id, amount_cents }: { id: string; amount_cents: number }) =>
+    salesApi.recordPayment(id, {
+      amount_cents,
+      method: paymentForm.value.method,
+      reference: paymentForm.value.reference || null,
+    }),
+  onSuccess: () => {
+    queryClient.invalidateQueries({ queryKey: ['sales', 'invoices'] })
+    queryClient.invalidateQueries({ queryKey: ['sales', 'customers'] })
+    queryClient.invalidateQueries({ queryKey: ['accounting'] })
+    isPaymentModalOpen.value = false
+    selectedInvoice.value = null
+    errorMessage.value = ''
+  },
+  onError: (err: any) => {
+    errorMessage.value = err?.response?.data?.message || err?.message || t('sales.messages.recordPaymentError')
+  },
+})
+
+const customerOptions = computed(() => [
+  { label: t('sales.createInvoiceModal.selectCustomer'), value: '' },
+  ...(customers.value || []).map((c) => ({ label: c.name, value: c.id })),
+])
+
+const invoiceStatusOptions = computed(() => [
+  { label: t('sales.createInvoiceModal.statusSent'), value: 'sent' },
+  { label: t('sales.createInvoiceModal.statusDraft'), value: 'draft' },
+])
+
+const paymentMethodOptions = computed(() => [
+  { label: t('sales.paymentModal.methods.cash'), value: 'cash' },
+  { label: t('sales.paymentModal.methods.card'), value: 'card' },
+  { label: t('sales.paymentModal.methods.bankTransfer'), value: 'bank_transfer' },
+  { label: t('sales.paymentModal.methods.other'), value: 'other' },
+])
+
+const filteredInvoices = computed(() => {
+  const q = searchQuery.value.toLowerCase().trim()
+  if (!invoices.value) return []
+  if (!q) return invoices.value
+  return invoices.value.filter(
+    (inv) =>
+      inv.number.toLowerCase().includes(q) ||
+      inv.customer?.name?.toLowerCase().includes(q) ||
+      inv.status.toLowerCase().includes(q)
+  )
+})
+
+const filteredCustomers = computed(() => {
+  const q = searchQuery.value.toLowerCase().trim()
+  if (!customers.value) return []
+  if (!q) return customers.value
+  return customers.value.filter(
+    (c) =>
+      c.name.toLowerCase().includes(q) ||
+      c.email?.toLowerCase().includes(q) ||
+      c.phone?.toLowerCase().includes(q)
+  )
+})
+
+const invoiceColumns = computed(() => [
+  { key: 'number', label: t('sales.invoiceTable.columns.number') },
+  { key: 'customer', label: t('sales.invoiceTable.columns.customer') },
+  { key: 'dates', label: t('sales.invoiceTable.columns.dates') },
+  { key: 'breakdown', label: t('sales.invoiceTable.columns.subtotalTax'), align: 'right' as const },
+  { key: 'total', label: t('sales.invoiceTable.columns.totalAmount'), align: 'right' as const },
+  { key: 'status', label: t('sales.invoiceTable.columns.status') },
+  { key: 'actions', label: t('sales.invoiceTable.columns.actions'), align: 'right' as const },
+])
+
+const customerColumns = computed(() => [
+  { key: 'name', label: t('sales.customerTable.columns.name') },
+  { key: 'contact', label: t('sales.customerTable.columns.contact') },
+  { key: 'invoices_count', label: t('sales.customerTable.columns.invoices'), align: 'center' as const },
+  { key: 'financials', label: t('sales.customerTable.columns.financials') },
+  { key: 'actions', label: t('sales.customerTable.columns.actions'), align: 'right' as const },
+])
+
+// Real-time calculations
+const invoiceSubtotal = computed(() =>
+  invoiceForm.value.lines.reduce(
+    (sum, line) => sum + Number(line.quantity || 0) * Number(line.unit_price || 0),
+    0
+  )
+)
+
+const invoiceTaxDollars = computed(() => {
+  const rate = Math.max(0, Number(invoiceForm.value.tax_percent || 0))
+  return (invoiceSubtotal.value * rate) / 100
+})
+
+const invoiceTotal = computed(
+  () => invoiceSubtotal.value + invoiceTaxDollars.value
+)
+
+function getLineEffectivePriceWithTax(unitPrice: number) {
+  const rate = Math.max(0, Number(invoiceForm.value.tax_percent || 0))
+  return unitPrice * (1 + rate / 100)
+}
+
+const statusVariant = (status: InvoiceStatus) => {
+  if (status === 'paid') return 'success'
+  if (status === 'sent') return 'info'
+  if (status === 'void') return 'danger'
+  return 'default'
+}
+
+const resetInvoiceForm = () => {
+  invoiceForm.value = {
+    customer_id: '',
+    status: 'sent',
+    issue_date: today,
+    due_date: dueDefault,
+    tax_percent: 0,
+    notes: '',
+    lines: [
+      {
+        product_id: '',
+        sku: '',
+        description: '',
+        quantity: 1,
+        unit_price: 0,
+        search_query: '',
+        is_dropdown_open: false,
+      },
+    ],
+  }
+}
+
+const openInvoiceModal = (presetCustomerId?: string) => {
+  errorMessage.value = ''
+  resetInvoiceForm()
+  if (presetCustomerId) {
+    invoiceForm.value.customer_id = presetCustomerId
+  }
+  isInvoiceModalOpen.value = true
+}
+
+const openCustomerModal = () => {
+  errorMessage.value = ''
+  customerForm.value = { name: '', email: '', phone: '' }
+  isCustomerModalOpen.value = true
+}
+
+const openEditCustomerModal = (customer: Customer) => {
+  errorMessage.value = ''
+  editingCustomerId.value = customer.id
+  customerForm.value = {
+    name: customer.name,
+    email: customer.email || '',
+    phone: customer.phone || '',
+  }
+  isEditCustomerModalOpen.value = true
+}
+
+const handleSaveCustomerEdit = () => {
+  if (!editingCustomerId.value || !customerForm.value.name) return
+  updateCustomerMutation.mutate({
+    id: editingCustomerId.value,
+    data: {
+      name: customerForm.value.name,
+      email: customerForm.value.email || null,
+      phone: customerForm.value.phone || null,
+    },
+  })
+}
+
+const handleDeleteCustomer = (customer: Customer) => {
+  if ((customer.invoices_count ?? 0) > 0) {
+    alert(t('sales.messages.cannotDeleteWithInvoices', { name: customer.name, count: customer.invoices_count }))
+    return
+  }
+  if (!confirm(t('sales.messages.confirmDeleteCustomer', { name: customer.name }))) return
+  deleteCustomerMutation.mutate(customer.id)
+}
+
+const viewCustomerInvoices = (customer?: Customer | null) => {
+  if (!customer) return
+  searchQuery.value = customer.name
+  activeTab.value = 'invoices'
+}
+
+const addLine = () => {
+  invoiceForm.value.lines.push({
+    product_id: '',
+    sku: '',
+    description: '',
+    quantity: 1,
+    unit_price: 0,
+    search_query: '',
+    is_dropdown_open: false,
+  })
+}
+
+const removeLine = (index: number) => {
+  if (invoiceForm.value.lines.length === 1) return
+  invoiceForm.value.lines.splice(index, 1)
+}
+
+const openPaymentModal = (invoice: Invoice) => {
+  selectedInvoice.value = invoice
+  const total = Number(invoice.total_cents || 0)
+  const paid = Number(invoice.amount_paid_cents || 0)
+  const outstanding = Math.max(0, total - paid) / 100
+
+  paymentForm.value = {
+    amount_dollars: outstanding,
+    method: 'cash',
+    reference: '',
+  }
+  errorMessage.value = ''
+  isPaymentModalOpen.value = true
+}
+
+const markPaid = async (invoice: Invoice) => {
+  errorMessage.value = ''
+  try {
+    let current = invoice
+    if (current.status === 'draft') {
+      const sent = await salesApi.markSent(current.id)
+      current = sent.data.data
+    }
+    if (current.status === 'paid') return
+    const total = Number(current.total_cents || 0)
+    const paid = Number(current.amount_paid_cents || 0)
+    const outstanding = Math.max(0, total - paid)
+    if (outstanding <= 0) return
+
+    await salesApi.recordPayment(current.id, {
+      amount_cents: outstanding,
+      method: 'cash',
+      reference: t('sales.paymentModal.markedPaidRef'),
+    })
+    queryClient.invalidateQueries({ queryKey: ['sales', 'invoices'] })
+    queryClient.invalidateQueries({ queryKey: ['sales', 'customers'] })
+    queryClient.invalidateQueries({ queryKey: ['accounting'] })
+  } catch (err: any) {
+    errorMessage.value = err?.message || t('sales.messages.markPaidError')
+  }
+}
+
+const submitPayment = () => {
+  if (!selectedInvoice.value) return
+  recordPaymentMutation.mutate({
+    id: selectedInvoice.value.id,
+    amount_cents: Math.round(Number(paymentForm.value.amount_dollars || 0) * 100),
+  })
+}
+
+const cents = (value: any) => {
+  const num = Number(value || 0)
+  return formatCurrency(num / 100)
+}
+</script>
+
+<template>
+  <div class="space-y-6">
+    <!-- Header -->
+    <div class="flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
+      <div>
+        <h1 class="text-2xl font-bold text-slate-900">{{ t('sales.title') }}</h1>
+        <p class="text-slate-500">{{ t('sales.subtitle') }}</p>
+      </div>
+      <div class="flex flex-wrap gap-2">
+        <UiButton variant="outline" @click="openCustomerModal">
+          <Users class="h-4 w-4 mr-2" /> {{ t('sales.newCustomer') }}
+        </UiButton>
+        <UiButton @click="openInvoiceModal()">
+          <Plus class="h-4 w-4 mr-2" /> {{ t('sales.newInvoice') }}
+        </UiButton>
+      </div>
+    </div>
+
+    <!-- Error Alert -->
+    <div v-if="errorMessage" class="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 flex items-center justify-between">
+      <span>{{ errorMessage }}</span>
+      <button type="button" @click="errorMessage = ''" class="text-red-500 hover:text-red-700 font-bold ml-2">✕</button>
+    </div>
+
+    <!-- Financial KPI Summary Cards -->
+    <div class="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+      <!-- Total Invoiced -->
+      <div class="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
+        <div class="flex items-center justify-between">
+          <p class="text-xs font-bold uppercase tracking-wider text-slate-500">{{ t('sales.kpis.totalInvoiced') }}</p>
+          <div class="p-2 rounded-xl bg-blue-50 text-blue-600">
+            <Receipt class="w-4 h-4" />
+          </div>
+        </div>
+        <p class="mt-2 text-2xl font-black text-slate-900 font-mono">
+          {{ cents(financialSummary.totalInvoicedCents) }}
+        </p>
+        <p class="text-xs text-slate-400 mt-1">{{ t('sales.kpis.totalInvoicedDesc') }}</p>
+      </div>
+
+      <!-- Total Collected -->
+      <div class="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
+        <div class="flex items-center justify-between">
+          <p class="text-xs font-bold uppercase tracking-wider text-slate-500">{{ t('sales.kpis.totalCollected') }}</p>
+          <div class="p-2 rounded-xl bg-emerald-50 text-emerald-600">
+            <CheckCircle2 class="w-4 h-4" />
+          </div>
+        </div>
+        <p class="mt-2 text-2xl font-black text-emerald-600 font-mono">
+          {{ cents(financialSummary.totalCollectedCents) }}
+        </p>
+        <p class="text-xs text-slate-400 mt-1">{{ t('sales.kpis.totalCollectedDesc') }}</p>
+      </div>
+
+      <!-- Outstanding Receivables -->
+      <div class="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
+        <div class="flex items-center justify-between">
+          <p class="text-xs font-bold uppercase tracking-wider text-slate-500">{{ t('sales.kpis.outstandingBalance') }}</p>
+          <div class="p-2 rounded-xl bg-amber-50 text-amber-600">
+            <Clock class="w-4 h-4" />
+          </div>
+        </div>
+        <p class="mt-2 text-2xl font-black text-amber-600 font-mono">
+          {{ cents(financialSummary.totalOutstandingCents) }}
+        </p>
+        <p class="text-xs text-slate-400 mt-1">{{ t('sales.kpis.outstandingBalanceDesc') }}</p>
+      </div>
+
+      <!-- Overdue Amount -->
+      <div class="rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
+        <div class="flex items-center justify-between">
+          <p class="text-xs font-bold uppercase tracking-wider text-slate-500">{{ t('sales.kpis.overdueInvoices') }}</p>
+          <div class="p-2 rounded-xl bg-red-50 text-red-600">
+            <AlertCircle class="w-4 h-4" />
+          </div>
+        </div>
+        <p class="mt-2 text-2xl font-black text-red-600 font-mono">
+          {{ cents(financialSummary.overdueCents) }}
+        </p>
+        <p class="text-xs text-slate-400 mt-1">{{ t('sales.kpis.overdueInvoicesDesc', { count: financialSummary.overdueCount }) }}</p>
+      </div>
+    </div>
+
+    <!-- Tabs -->
+    <div class="flex gap-2 border-b border-slate-200">
+      <button
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors flex items-center gap-2"
+        :class="activeTab === 'invoices' ? 'border-primary-600 text-primary-700 font-bold' : 'border-transparent text-slate-500 hover:text-slate-700'"
+        @click="activeTab = 'invoices'"
+      >
+        <FileText class="h-4 w-4" />
+        <span>{{ t('sales.tabs.invoices', { count: invoices?.length || 0 }) }}</span>
+      </button>
+      <button
+        class="px-4 py-2 text-sm font-medium border-b-2 -mb-px transition-colors flex items-center gap-2"
+        :class="activeTab === 'customers' ? 'border-primary-600 text-primary-700 font-bold' : 'border-transparent text-slate-500 hover:text-slate-700'"
+        @click="activeTab = 'customers'"
+      >
+        <Users class="h-4 w-4" />
+        <span>{{ t('sales.tabs.customers', { count: customers?.length || 0 }) }}</span>
+      </button>
+    </div>
+
+    <!-- Search Input -->
+    <div class="bg-white p-4 rounded-xl border border-slate-200 shadow-xs">
+      <UiInput v-model="searchQuery" :placeholder="activeTab === 'invoices' ? t('sales.searchInvoicesPlaceholder') : t('sales.searchCustomersPlaceholder')" class="w-full max-w-sm">
+        <template #prefix><Search class="h-4 w-4 text-slate-400" /></template>
+      </UiInput>
+    </div>
+
+    <!-- Invoices Table -->
+    <UiTable
+      v-if="activeTab === 'invoices'"
+      :columns="invoiceColumns"
+      :data="filteredInvoices"
+      :loading="invoicesLoading"
+    >
+      <template #cell(number)="{ item }">
+        <div class="font-bold text-slate-900 font-mono text-sm">{{ item.number }}</div>
+      </template>
+
+      <template #cell(customer)="{ item }">
+        <button
+          type="button"
+          @click="viewCustomerInvoices(item.customer)"
+          class="text-left font-medium text-blue-600 hover:underline"
+          :title="t('sales.invoiceTable.viewCustomerInvoices', { name: item.customer?.name || '' })"
+        >
+          {{ item.customer?.name || '—' }}
+        </button>
+      </template>
+
+      <template #cell(dates)="{ item }">
+        <div class="text-xs space-y-0.5">
+          <p class="text-slate-700">{{ t('sales.invoiceTable.issued') }} <span class="font-medium">{{ formatDate(item.issue_date) }}</span></p>
+          <p class="text-slate-400">{{ t('sales.invoiceTable.due') }} <span class="font-medium">{{ formatDate(item.due_date) }}</span></p>
+        </div>
+      </template>
+
+      <template #cell(breakdown)="{ item }">
+        <div class="text-right text-xs space-y-0.5 font-mono">
+          <p class="text-slate-600">{{ t('sales.invoiceTable.net') }} {{ cents(item.subtotal_cents) }}</p>
+          <p v-if="Number(item.tax_cents || 0) > 0" class="text-amber-600">{{ t('sales.invoiceTable.tax') }} {{ cents(item.tax_cents) }}</p>
+        </div>
+      </template>
+
+      <template #cell(total)="{ item }">
+        <div class="text-right font-bold text-slate-900 font-mono text-sm">{{ cents(item.total_cents) }}</div>
+        <div v-if="Number(item.amount_paid_cents || 0) > 0" class="text-right text-[11px] text-emerald-600 font-semibold font-mono">
+          {{ t('sales.invoiceTable.paid') }} {{ cents(item.amount_paid_cents) }}
+        </div>
+        <div v-if="Math.max(0, Number(item.total_cents || 0) - Number(item.amount_paid_cents || 0)) > 0 && item.status !== 'void'" class="text-right text-[11px] text-amber-600 font-bold font-mono">
+          {{ t('sales.invoiceTable.amountDue') }} {{ cents(Math.max(0, Number(item.total_cents || 0) - Number(item.amount_paid_cents || 0))) }}
+        </div>
+      </template>
+
+      <template #cell(status)="{ item }">
+        <UiBadge :variant="statusVariant(item.status)" class="capitalize font-bold">{{ t('sales.status.' + item.status) }}</UiBadge>
+      </template>
+
+      <template #cell(actions)="{ item }">
+        <div class="flex justify-end gap-1.5">
+          <UiButton
+            v-if="item.status === 'draft'"
+            variant="outline"
+            size="sm"
+            :loading="markSentMutation.isPending.value"
+            @click="markSentMutation.mutate(item.id)"
+          >
+            {{ t('sales.invoiceTable.actions.markSent') }}
+          </UiButton>
+          <UiButton
+            v-if="item.status === 'sent'"
+            variant="outline"
+            size="sm"
+            @click="openPaymentModal(item)"
+          >
+            {{ t('sales.invoiceTable.actions.recordPayment') }}
+          </UiButton>
+          <UiButton
+            v-if="item.status === 'draft' || item.status === 'sent'"
+            size="sm"
+            @click="markPaid(item)"
+          >
+            {{ t('sales.invoiceTable.actions.markPaid') }}
+          </UiButton>
+        </div>
+      </template>
+    </UiTable>
+
+    <!-- Customers Table with Actions & Accurate Stats -->
+    <UiTable
+      v-else
+      :columns="customerColumns"
+      :data="filteredCustomers"
+      :loading="customersLoading"
+    >
+      <template #cell(name)="{ item }">
+        <div class="py-1">
+          <div class="font-bold text-slate-900 text-sm flex items-center gap-2">
+            <span>{{ item.name }}</span>
+          </div>
+          <span class="text-[11px] text-slate-400 font-mono">ID: {{ item.id.substring(0, 8) }}…</span>
+        </div>
+      </template>
+
+      <template #cell(contact)="{ item }">
+        <div class="space-y-0.5 text-xs text-slate-600">
+          <div v-if="item.email" class="flex items-center gap-1.5">
+            <Mail class="w-3.5 h-3.5 text-slate-400" />
+            <a :href="'mailto:' + item.email" class="hover:text-blue-600 hover:underline">{{ item.email }}</a>
+          </div>
+          <div v-if="item.phone" class="flex items-center gap-1.5">
+            <Phone class="w-3.5 h-3.5 text-slate-400" />
+            <span>{{ item.phone }}</span>
+          </div>
+          <span v-if="!item.email && !item.phone" class="text-slate-400 italic">{{ t('sales.customerTable.noContactInfo') }}</span>
+        </div>
+      </template>
+
+      <template #cell(invoices_count)="{ item }">
+        <button
+          type="button"
+          @click="viewCustomerInvoices(item)"
+          class="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold bg-slate-100 text-slate-700 hover:bg-blue-50 hover:text-blue-600 transition-colors"
+        >
+          <Receipt class="w-3.5 h-3.5" />
+          <span>{{ item.invoices_count ?? 0 }}</span>
+        </button>
+      </template>
+
+      <template #cell(financials)="{ item }">
+        <div class="text-xs space-y-0.5 font-mono">
+          <div class="flex items-center justify-between gap-4">
+            <span class="text-slate-400">{{ t('sales.customerTable.totalInvoiced') }}</span>
+            <span class="font-bold text-slate-900">{{ cents(item.total_invoiced_cents) }}</span>
+          </div>
+          <div class="flex items-center justify-between gap-4">
+            <span class="text-slate-400">{{ t('sales.customerTable.totalPaid') }}</span>
+            <span class="font-semibold text-emerald-600">{{ cents(item.total_paid_cents) }}</span>
+          </div>
+          <div v-if="Number(item.outstanding_cents || 0) > 0" class="flex items-center justify-between gap-4 pt-0.5 border-t border-slate-100">
+            <span class="text-amber-600 font-bold">{{ t('sales.customerTable.outstanding') }}</span>
+            <span class="font-bold text-amber-600">{{ cents(item.outstanding_cents) }}</span>
+          </div>
+          <div v-else-if="Number(item.total_invoiced_cents || 0) > 0" class="flex items-center justify-between gap-4 pt-0.5 border-t border-slate-100">
+            <span class="text-emerald-600 font-medium">{{ t('sales.customerTable.status') }}</span>
+            <span class="font-bold text-emerald-600">{{ t('sales.customerTable.fullySettled') }}</span>
+          </div>
+        </div>
+      </template>
+
+      <!-- Customer Action Buttons -->
+      <template #cell(actions)="{ item }">
+        <div class="flex items-center justify-end gap-1.5">
+          <!-- Create Invoice for Customer -->
+          <UiButton
+            size="sm"
+            variant="outline"
+            class="text-xs"
+            @click="openInvoiceModal(item.id)"
+            :title="t('sales.customerTable.actions.createInvoiceTooltip')"
+          >
+            <Plus class="w-3.5 h-3.5 mr-1 text-primary-600" />
+            {{ t('sales.customerTable.actions.invoice') }}
+          </UiButton>
+
+          <!-- Edit Customer -->
+          <button
+            type="button"
+            class="p-2 text-slate-400 hover:text-blue-600 hover:bg-blue-50 rounded-xl transition-colors"
+            @click="openEditCustomerModal(item)"
+            :title="t('sales.customerTable.actions.editCustomerTooltip')"
+          >
+            <Edit2 class="w-4 h-4" />
+          </button>
+
+          <!-- Delete Customer -->
+          <button
+            type="button"
+            class="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-slate-400"
+            :disabled="(item.invoices_count ?? 0) > 0"
+            @click="handleDeleteCustomer(item)"
+            :title="(item.invoices_count ?? 0) > 0 ? t('sales.customerTable.actions.cannotDeleteTooltip') : t('sales.customerTable.actions.deleteCustomerTooltip')"
+          >
+            <Trash2 class="w-4 h-4" />
+          </button>
+        </div>
+      </template>
+    </UiTable>
+
+    <!-- Create Invoice Modal -->
+    <UiModal v-model="isInvoiceModalOpen" :title="t('sales.createInvoiceModal.title')" size="2xl">
+      <div class="space-y-5">
+        <!-- Customer & Date Fields -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+          <div class="space-y-1.5">
+            <div class="flex justify-between items-center">
+              <label class="block text-xs font-bold uppercase tracking-wider text-slate-700">{{ t('sales.createInvoiceModal.customer') }} <span class="text-red-500">*</span></label>
+              <button
+                type="button"
+                @click="openCustomerModal"
+                class="text-xs text-blue-600 hover:text-blue-700 font-bold inline-flex items-center gap-1 hover:underline"
+              >
+                <Plus class="w-3.5 h-3.5" /> {{ t('sales.createInvoiceModal.newCustomer') }}
+              </button>
+            </div>
+            <UiSelect
+              v-model="invoiceForm.customer_id"
+              :options="customerOptions"
+              :placeholder="t('sales.createInvoiceModal.selectCustomer')"
+            />
+          </div>
+          <UiSelect
+            v-model="invoiceForm.status"
+            :label="t('sales.createInvoiceModal.status')"
+            :options="invoiceStatusOptions"
+          />
+          <UiInput v-model="invoiceForm.issue_date" type="date" :label="t('sales.createInvoiceModal.issueDate')" />
+          <UiInput v-model="invoiceForm.due_date" type="date" :label="t('sales.createInvoiceModal.dueDate')" />
+        </div>
+
+        <!-- Line Items with Inventory Product Search -->
+        <div class="space-y-3">
+          <div class="flex items-center justify-between">
+            <div>
+              <h3 class="text-sm font-bold text-slate-900">{{ t('sales.createInvoiceModal.lineItems') }}</h3>
+              <p class="text-xs text-slate-400">{{ t('sales.createInvoiceModal.lineItemsSubtitle') }}</p>
+            </div>
+            <UiButton variant="outline" size="sm" type="button" @click="addLine">
+              <Plus class="w-3.5 h-3.5 mr-1" /> {{ t('sales.createInvoiceModal.addLine') }}
+            </UiButton>
+          </div>
+
+          <div class="space-y-3">
+            <div
+              v-for="(line, index) in invoiceForm.lines"
+              :key="index"
+              class="p-3.5 rounded-2xl border border-slate-200/90 bg-slate-50/50 hover:bg-slate-50 space-y-2.5 transition-colors"
+            >
+              <div class="grid grid-cols-12 gap-3 items-start">
+                <!-- Product / Description Combobox -->
+                <div class="col-span-12 md:col-span-6 relative">
+                  <label class="block text-xs font-bold uppercase tracking-wider text-slate-700 mb-1">
+                    {{ t('sales.createInvoiceModal.productDescription') }} <span class="text-red-500">*</span>
+                  </label>
+                  <div class="relative">
+                    <input
+                      type="text"
+                      v-model="line.description"
+                      :placeholder="t('sales.createInvoiceModal.productSearchPlaceholder')"
+                      @focus="line.is_dropdown_open = true"
+                      @input="line.is_dropdown_open = true"
+                      class="block w-full rounded-xl border border-slate-200 bg-white text-sm py-2.5 pl-3 pr-8 font-medium text-slate-900 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all placeholder:text-slate-400"
+                    />
+                    <button
+                      type="button"
+                      @click="line.is_dropdown_open = !line.is_dropdown_open"
+                      class="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600"
+                    >
+                      <ChevronDown class="w-4 h-4" />
+                    </button>
+                  </div>
+
+                  <!-- Product Search Dropdown -->
+                  <div
+                    v-if="line.is_dropdown_open"
+                    class="absolute left-0 right-0 top-full mt-1.5 z-30 bg-white rounded-xl shadow-xl border border-slate-200 py-1 max-h-56 overflow-y-auto"
+                  >
+                    <div class="px-3 py-1.5 text-[11px] font-bold text-slate-400 uppercase tracking-wider border-b border-slate-100 flex items-center justify-between">
+                      <span>{{ t('sales.createInvoiceModal.inventoryCatalog') }}</span>
+                      <button
+                        type="button"
+                        class="text-slate-400 hover:text-slate-600 text-xs"
+                        @click.stop="line.is_dropdown_open = false"
+                      >
+                        ✕
+                      </button>
+                    </div>
+
+                    <div v-if="productsLoading" class="p-3 text-xs text-slate-400 text-center">
+                      {{ t('sales.createInvoiceModal.loadingProducts') }}
+                    </div>
+
+                    <template v-else>
+                      <button
+                        v-for="prod in getFilteredProducts(line.description)"
+                        :key="prod.id"
+                        type="button"
+                        @click="selectProductForLine(line, prod)"
+                        class="w-full px-3 py-2 text-left hover:bg-blue-50/80 flex items-center justify-between gap-2 border-b border-slate-50 last:border-0 transition-colors"
+                      >
+                        <div class="min-w-0">
+                          <p class="text-xs font-bold text-slate-900 truncate">{{ prod.name }}</p>
+                          <p class="text-[11px] text-slate-400 font-mono">SKU: {{ prod.sku || 'N/A' }}</p>
+                        </div>
+                        <div class="text-right shrink-0">
+                          <span class="text-xs font-black text-slate-900">
+                            {{ formatCurrency((prod.selling_price || 0) / 100) }}
+                          </span>
+                          <p class="text-[10px] text-emerald-600 font-medium">
+                            {{ t('sales.createInvoiceModal.inStock', { count: prod.available_quantity ?? prod.quantity_on_hand ?? 0 }) }}
+                          </p>
+                        </div>
+                      </button>
+
+                      <div
+                        v-if="getFilteredProducts(line.description).length === 0"
+                        class="p-3 text-xs text-slate-500 text-center"
+                      >
+                        {{ t('sales.createInvoiceModal.noInventoryMatches') }}
+                      </div>
+                    </template>
+                  </div>
+
+                  <!-- Linked product pill -->
+                  <div v-if="line.sku" class="mt-1 flex items-center gap-1.5 text-[11px] text-blue-600">
+                    <Package class="w-3 h-3" />
+                    <span class="font-mono font-semibold">{{ line.sku }}</span>
+                  </div>
+                </div>
+
+                <!-- Quantity -->
+                <div class="col-span-4 md:col-span-2">
+                  <UiInput
+                    v-model="line.quantity"
+                    type="number"
+                    :label="t('sales.createInvoiceModal.quantity')"
+                    min="0.01"
+                    step="1"
+                  />
+                </div>
+
+                <!-- Unit Price -->
+                <div class="col-span-5 md:col-span-3">
+                  <UiInput
+                    v-model="line.unit_price"
+                    type="number"
+                    :label="t('sales.createInvoiceModal.unitPrice')"
+                    step="0.01"
+                    min="0"
+                  />
+                </div>
+
+                <!-- Remove Button -->
+                <div class="col-span-3 md:col-span-1 flex justify-end pt-6">
+                  <button
+                    type="button"
+                    class="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-xl transition-colors disabled:opacity-30"
+                    :disabled="invoiceForm.lines.length === 1"
+                    @click="removeLine(index)"
+                    :title="t('sales.createInvoiceModal.removeLine')"
+                  >
+                    <Trash2 class="h-4 w-4" />
+                  </button>
+                </div>
+              </div>
+
+              <!-- Line Summary -->
+              <div class="flex items-center justify-between text-xs text-slate-500 pt-1 border-t border-slate-200/50">
+                <span>
+                  {{ t('sales.createInvoiceModal.lineSubtotal') }} <strong class="text-slate-800">{{ formatCurrency(Number(line.quantity || 0) * Number(line.unit_price || 0)) }}</strong>
+                </span>
+                <span v-if="Number(invoiceForm.tax_percent || 0) > 0" class="text-slate-600">
+                  {{ t('sales.createInvoiceModal.unitPriceWithTax', { percent: invoiceForm.tax_percent }) }} <strong class="text-slate-900">{{ formatCurrency(getLineEffectivePriceWithTax(Number(line.unit_price || 0))) }}</strong>
+                </span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Tax in Percentage Section -->
+        <div class="grid grid-cols-1 md:grid-cols-2 gap-4 p-4 rounded-2xl bg-blue-50/50 border border-blue-100">
+          <div class="space-y-2">
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-700">
+              {{ t('sales.createInvoiceModal.taxRate') }} <span class="text-slate-400 font-normal">{{ t('sales.createInvoiceModal.taxRateDesc') }}</span>
+            </label>
+            <div class="relative">
+              <input
+                v-model="invoiceForm.tax_percent"
+                type="number"
+                min="0"
+                max="100"
+                step="0.1"
+                placeholder="0"
+                class="block w-full rounded-xl border border-slate-200 bg-white text-sm py-2.5 pl-3 pr-10 font-bold text-slate-900 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all"
+              />
+              <div class="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 font-bold text-sm">
+                %
+              </div>
+            </div>
+
+            <!-- Quick Preset Percentages -->
+            <div class="flex items-center gap-1.5 flex-wrap">
+              <span class="text-[11px] font-semibold text-slate-500 mr-1">{{ t('sales.createInvoiceModal.presets') }}</span>
+              <button
+                v-for="rate in [0, 5, 10, 15, 18, 20]"
+                :key="rate"
+                type="button"
+                @click="invoiceForm.tax_percent = rate"
+                :class="[
+                  'px-2 py-0.5 rounded-lg text-xs font-bold transition-all',
+                  Number(invoiceForm.tax_percent) === rate
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100',
+                ]"
+              >
+                {{ rate }}%
+              </button>
+            </div>
+          </div>
+
+          <!-- Notes -->
+          <div class="space-y-1.5">
+            <label class="block text-xs font-bold uppercase tracking-wider text-slate-700">{{ t('sales.createInvoiceModal.notes') }}</label>
+            <textarea
+              v-model="invoiceForm.notes"
+              rows="2"
+              class="block w-full rounded-xl border border-slate-200 bg-white text-xs p-2.5 focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all placeholder:text-slate-400 font-medium text-slate-900"
+              :placeholder="t('sales.createInvoiceModal.notesPlaceholder')"
+            ></textarea>
+          </div>
+        </div>
+
+        <!-- Real-time Financial Breakdown -->
+        <div class="rounded-2xl bg-slate-900 text-white p-4 space-y-2 shadow-sm">
+          <div class="flex items-center justify-between text-xs text-slate-300">
+            <span>{{ t('sales.createInvoiceModal.subtotalNet') }}</span>
+            <span class="font-mono font-bold">{{ formatCurrency(invoiceSubtotal) }}</span>
+          </div>
+
+          <div class="flex items-center justify-between text-xs text-slate-300">
+            <span>{{ t('sales.createInvoiceModal.taxAmount', { percent: Number(invoiceForm.tax_percent || 0) }) }}</span>
+            <span class="font-mono font-bold text-amber-300">+ {{ formatCurrency(invoiceTaxDollars) }}</span>
+          </div>
+
+          <div class="pt-2 border-t border-slate-700/80 flex items-center justify-between text-sm">
+            <span class="font-bold">{{ t('sales.createInvoiceModal.totalAmount') }}</span>
+            <span class="font-black text-lg text-emerald-400 font-mono">{{ formatCurrency(invoiceTotal) }}</span>
+          </div>
+        </div>
+
+        <!-- Modal Actions -->
+        <div class="flex justify-end gap-3 pt-3 border-t border-slate-100">
+          <UiButton variant="outline" @click="isInvoiceModalOpen = false">{{ t('sales.createInvoiceModal.cancel') }}</UiButton>
+          <UiButton
+            :loading="createInvoiceMutation.isPending.value"
+            :disabled="!invoiceForm.customer_id || invoiceForm.lines.some((l) => !l.description && !l.search_query)"
+            @click="createInvoiceMutation.mutate()"
+          >
+            {{ t('sales.createInvoiceModal.submit') }}
+          </UiButton>
+        </div>
+      </div>
+    </UiModal>
+
+    <!-- Create Customer Modal -->
+    <UiModal v-model="isCustomerModalOpen" :title="t('sales.customerModal.newTitle')" size="md">
+      <div class="space-y-4">
+        <UiInput v-model="customerForm.name" :label="t('sales.customerModal.name')" :placeholder="t('sales.customerModal.namePlaceholder')" />
+        <UiInput v-model="customerForm.email" type="email" :label="t('sales.customerModal.email')" :placeholder="t('sales.customerModal.emailPlaceholder')" />
+        <UiInput v-model="customerForm.phone" :label="t('sales.customerModal.phone')" :placeholder="t('sales.customerModal.phonePlaceholder')" />
+        <div class="flex justify-end gap-3 pt-4 border-t border-slate-100">
+          <UiButton variant="outline" @click="isCustomerModalOpen = false">{{ t('sales.customerModal.cancel') }}</UiButton>
+          <UiButton
+            :loading="createCustomerMutation.isPending.value"
+            :disabled="!customerForm.name"
+            @click="createCustomerMutation.mutate()"
+          >
+            {{ t('sales.customerModal.saveCustomer') }}
+          </UiButton>
+        </div>
+      </div>
+    </UiModal>
+
+    <!-- Edit Customer Modal -->
+    <UiModal v-model="isEditCustomerModalOpen" :title="t('sales.customerModal.editTitle')" size="md">
+      <div class="space-y-4">
+        <UiInput v-model="customerForm.name" :label="t('sales.customerModal.name')" :placeholder="t('sales.customerModal.namePlaceholder')" />
+        <UiInput v-model="customerForm.email" type="email" :label="t('sales.customerModal.email')" :placeholder="t('sales.customerModal.emailPlaceholder')" />
+        <UiInput v-model="customerForm.phone" :label="t('sales.customerModal.phone')" :placeholder="t('sales.customerModal.phonePlaceholder')" />
+        <div class="flex justify-end gap-3 pt-4 border-t border-slate-100">
+          <UiButton variant="outline" @click="isEditCustomerModalOpen = false">{{ t('sales.customerModal.cancel') }}</UiButton>
+          <UiButton
+            :loading="updateCustomerMutation.isPending.value"
+            :disabled="!customerForm.name"
+            @click="handleSaveCustomerEdit"
+          >
+            {{ t('sales.customerModal.updateCustomer') }}
+          </UiButton>
+        </div>
+      </div>
+    </UiModal>
+
+    <!-- Record Payment Modal -->
+    <UiModal v-model="isPaymentModalOpen" :title="t('sales.paymentModal.title')" size="md">
+      <div class="space-y-4">
+        <p v-if="selectedInvoice" class="text-sm text-slate-500">
+          {{ t('sales.paymentModal.invoiceOutstanding', { number: selectedInvoice.number, amount: cents(Math.max(0, Number(selectedInvoice.total_cents || 0) - Number(selectedInvoice.amount_paid_cents || 0))) }) }}
+        </p>
+        <UiInput v-model="paymentForm.amount_dollars" type="number" :label="t('sales.paymentModal.amount')" step="0.01" />
+        <UiSelect
+          v-model="paymentForm.method"
+          :label="t('sales.paymentModal.method')"
+          :options="paymentMethodOptions"
+        />
+        <UiInput v-model="paymentForm.reference" :label="t('sales.paymentModal.reference')" :placeholder="t('sales.paymentModal.referencePlaceholder')" />
+        <div class="flex justify-end gap-3 pt-4 border-t border-slate-100">
+          <UiButton variant="outline" @click="isPaymentModalOpen = false">{{ t('sales.paymentModal.cancel') }}</UiButton>
+          <UiButton
+            :loading="recordPaymentMutation.isPending.value"
+            :disabled="!paymentForm.amount_dollars"
+            @click="submitPayment"
+          >
+            {{ t('sales.paymentModal.submit') }}
+          </UiButton>
+        </div>
+      </div>
+    </UiModal>
+  </div>
+</template>

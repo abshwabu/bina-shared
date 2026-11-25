@@ -1,0 +1,79 @@
+<?php
+
+declare(strict_types=1);
+
+use App\Modules\Core\Models\Tenant;
+use App\Modules\Core\Tenancy\Finders\DomainTenantFinder;
+use App\Modules\Core\Tenancy\Finders\SubdomainTenantFinder;
+use App\Modules\Core\Tenancy\PostgreSQLSchemaManager;
+use App\Modules\Core\Tenancy\SQLiteDatabaseManager;
+
+// Only collect /tenant sub-directory migration paths from all modules.
+// Top-level module migrations (e.g. Inventory stock tables) are central-only
+// and are loaded by ModuleServiceProvider via loadMigrationsFrom().
+$moduleMigrationPaths = array_values(array_filter(
+    glob(app_path('Modules/*/database/migrations/tenant'), GLOB_ONLYDIR) ?: [],
+    'is_dir'
+));
+
+return [
+    'tenant_model' => Tenant::class,
+    'id_generator' => Stancl\Tenancy\UUIDGenerator::class,
+    'domain_model' => Stancl\Tenancy\Database\Models\Domain::class,
+    'central_domains' => array_values(array_unique(array_filter([
+        '127.0.0.1',
+        'localhost',
+        'erp.abshewabu.dev',
+        parse_url((string) env('APP_URL', 'http://localhost:8000'), PHP_URL_HOST) ?? null,
+    ]))),
+    'tenant_finders' => [
+        SubdomainTenantFinder::class,
+        DomainTenantFinder::class,
+    ],
+    'bootstrappers' => [
+        Stancl\Tenancy\Bootstrappers\DatabaseTenancyBootstrapper::class,
+        Stancl\Tenancy\Bootstrappers\CacheTenancyBootstrapper::class,
+        Stancl\Tenancy\Bootstrappers\FilesystemTenancyBootstrapper::class,
+        Stancl\Tenancy\Bootstrappers\QueueTenancyBootstrapper::class,
+    ],
+    'database' => [
+        'central_connection' => env('DB_CONNECTION', 'sqlite'),
+        'template_tenant_connection' => env('TENANT_DB_CONNECTION', null),
+        'prefix' => env('TENANT_DB_PREFIX', 'tenant_'),
+        'suffix' => env('TENANT_DB_SUFFIX', ''),
+        'managers' => [
+            'sqlite' => SQLiteDatabaseManager::class,
+            'mysql' => Stancl\Tenancy\TenantDatabaseManagers\MySQLDatabaseManager::class,
+            'mariadb' => Stancl\Tenancy\TenantDatabaseManagers\MySQLDatabaseManager::class,
+            'pgsql' => PostgreSQLSchemaManager::class,
+        ],
+    ],
+    'cache' => [
+        'tag_base' => 'tenant',
+    ],
+    'filesystem' => [
+        'suffix_base' => 'tenant',
+        'disks' => [
+            'local',
+        ],
+        'root_override' => [
+            'local' => '%storage_path%/app/',
+        ],
+        'suffix_storage_path' => true,
+        'asset_helper_tenancy' => false,
+    ],
+    'redis' => [
+        'prefix_base' => 'tenant',
+        'prefixed_connections' => [],
+    ],
+    'features' => [],
+    'routes' => true,
+    'migration_parameters' => [
+        '--force' => true,
+        '--path' => array_merge([database_path('migrations/tenant')], $moduleMigrationPaths),
+        '--realpath' => true,
+    ],
+    'seeder_parameters' => [
+        '--class' => 'DatabaseSeeder',
+    ],
+];
